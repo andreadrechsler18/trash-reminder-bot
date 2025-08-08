@@ -1,111 +1,95 @@
 from flask import Flask, request, jsonify
-import json
-import os
 from twilio.rest import Client
+import os
+import datetime
 
 app = Flask(__name__)
 
-# === File storage ===
-DATA_FILE = "users.json"
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")  # Set in Render settings
+# In-memory user store (replace with DB for production)
+users = []
 
-# === Twilio credentials from environment variables ===
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
+# Load Twilio credentials from environment
+account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+whatsapp_from = os.getenv('TWILIO_WHATSAPP_FROM')
 
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-else:
-    twilio_client = None
-
-# Load existing users
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        try:
-            user_data = json.load(f)
-        except json.JSONDecodeError:
-            user_data = []
-else:
-    user_data = []
+client = Client(account_sid, auth_token)
 
 @app.route('/')
 def home():
-    return "Webhook is live!"
+    return "Trash Reminder Bot is running!"
+
+@app.route('/test_message')
+def test_message():
+    to = request.args.get('to')
+    if not to:
+        return "Missing 'to' parameter", 400
+
+    try:
+        message = client.messages.create(
+            body="This is a test WhatsApp message from Trash Reminder Bot!",
+            from_=whatsapp_from,
+            to=to
+        )
+        return f"Test message sent to {to}. Message SID: {message.sid}"
+    except Exception as e:
+        return f"Failed to send message: {str(e)}", 500
 
 @app.route('/add_user', methods=['POST'])
 def add_user():
     data = request.get_json()
-    address = data.get('address')
-    phone = data.get('phone')
+    if not data:
+        return "Missing JSON data", 400
+
+    street_address = data.get('street_address')
+    phone_number = data.get('phone_number')
     consent = data.get('consent')
 
-    if not consent:
-        print(f"❌ Consent not given for: {phone}")
-        return jsonify({"status": "consent_not_given"}), 403
+    if not (street_address and phone_number and consent):
+        return "Missing required fields", 400
 
-    if any(u['phone'] == phone for u in user_data):
-        print(f"ℹ️ User already exists: {phone}")
-        return jsonify({"status": "already_exists"}), 200
+    # Simple check for duplicates
+    if any(u['phone_number'] == phone_number for u in users):
+        return "User already registered", 409
 
-    # Save new user
-    user_data.append({
-        "address": address,
-        "phone": phone
+    users.append({
+        'street_address': street_address,
+        'phone_number': phone_number,
+        'consent': consent,
+        'added_at': datetime.datetime.utcnow().isoformat()
     })
-    with open(DATA_FILE, "w") as f:
-        json.dump(user_data, f, indent=2)
 
-    print(f"✅ Added user: {phone} at {address}")
+    return jsonify({"message": "User added successfully"}), 201
 
-    # Send WhatsApp confirmation
-    if twilio_client:
+@app.route('/send_reminders')
+def send_reminders():
+    # Placeholder: you would add your logic here to:
+    # - Check today's date & holiday rules
+    # - Determine trash/recycling type per user address
+    # - Send WhatsApp reminders to each user who consented
+
+    # For now, just simulate sending a reminder to all users
+    sent = 0
+    failed = 0
+    for user in users:
+        if user['consent'].lower() != 'yes':
+            continue
+        to = user['phone_number']
         try:
-            twilio_client.messages.create(
-                from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                to=f"whatsapp:{phone}",
-                body=(
-                    f"Hi! You’re now signed up for the Lower Merion trash & recycling reminders. "
-                    f"We’ll send you a message the night before your trash day."
-                )
+            client.messages.create(
+                body=f"Reminder: Trash day is tomorrow at {user['street_address']}. Don't forget to put out your bins!",
+                from_=whatsapp_from,
+                to=to
             )
-            print(f"📩 WhatsApp confirmation sent to {phone}")
-        except Exception as e:
-            print(f"⚠️ Failed to send WhatsApp message: {e}")
+            sent += 1
+        except Exception:
+            failed += 1
 
-    return jsonify({"status": "success"}), 200
-
-@app.route('/users', methods=['GET'])
-def get_users():
-    password = request.args.get("password")
-    if password != ADMIN_PASSWORD:
-        return jsonify({"error": "Unauthorized"}), 401
-    return jsonify(user_data), 200
+    return jsonify({
+        "sent": sent,
+        "failed": failed,
+        "total": len(users)
+    })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
-
-
-############test
-app = Flask(__name__)
-
-@app.route("/test_message", methods=["GET"])
-def test_message():
-    try:
-        account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-        auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-        from_whatsapp_number = os.environ.get("TWILIO_WHATSAPP_NUMBER")
-
-        client = Client(account_sid, auth_token)
-
-        to_number = "whatsapp:+13029812102"  # your number in WhatsApp format
-
-        message = client.messages.create(
-            from_=from_whatsapp_number,
-            body="✅ Test: Your trash reminder bot is working!",
-            to=to_number
-        )
-
-        return jsonify({"status": "sent", "sid": message.sid})
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)})
+    app.run(host='0.0.0.0', port=10000)
