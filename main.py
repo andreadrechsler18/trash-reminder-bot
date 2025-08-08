@@ -84,3 +84,28 @@ def get_users():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
+
+############test
+app = Flask(__name__)
+
+@app.route("/test_message", methods=["GET"])
+def test_message():
+    try:
+        account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+        auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+        from_whatsapp_number = os.environ.get("TWILIO_WHATSAPP_NUMBER")
+
+        client = Client(account_sid, auth_token)
+
+        to_number = "whatsapp:+13029812102"  # your number in WhatsApp format
+
+        message = client.messages.create(
+            from_=from_whatsapp_number,
+            body="✅ Test: Your trash reminder bot is working!",
+            to=to_number
+        )
+
+        return jsonify({"status": "sent", "sid": message.sid})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)})
