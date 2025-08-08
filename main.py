@@ -9,9 +9,9 @@ app = Flask(__name__)
 users = []
 
 # Load Twilio credentials from environment
-account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-whatsapp_from = os.getenv('TWILIO_WHATSAPP_FROM')
+account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+whatsapp_from = os.environ.get('TWILIO_WHATSAPP_FROM')
 
 client = Client(account_sid, auth_token)
 
@@ -43,6 +43,11 @@ def add_user():
 
     street_address = data.get('street_address')
     phone_number = data.get('phone_number')
+    if phone_number and not phone_number.startswith('whatsapp:'):
+        #ensure leading plus sign
+        if not phone_number.startswith('+'):
+            phone_number = '+' + phone_number
+        phone_number = f"whatsapp:{phone_number}"
     consent = data.get('consent')
 
     if not (street_address and phone_number and consent):
@@ -56,7 +61,7 @@ def add_user():
         'street_address': street_address,
         'phone_number': phone_number,
         'consent': consent,
-        'added_at': datetime.datetime.utcnow().isoformat()
+        'added_at': datetime.datetime.datetime.datetime.now(datetime.timezone.utc).isoformat()
     })
 
     return jsonify({"message": "User added successfully"}), 201
@@ -75,6 +80,8 @@ def send_reminders():
         if user['consent'].lower() != 'yes':
             continue
         to = user['phone_number']
+        if not to.startswith('whatsapp:'):
+            to = f"whatsapp:{to}"
         try:
             client.messages.create(
                 body=f"Reminder: Trash day is tomorrow at {user['street_address']}. Don't forget to put out your bins!",
@@ -93,3 +100,4 @@ def send_reminders():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
+
