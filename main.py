@@ -1,13 +1,25 @@
 from flask import Flask, request, jsonify
 import json
 import os
+from twilio.rest import Client
 
 app = Flask(__name__)
 
+# === File storage ===
 DATA_FILE = "users.json"
-ADMIN_PASSWORD = "trashadmin123"  # Change this to something private
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")  # Set in Render settings
 
-# Load existing users from file when server starts
+# === Twilio credentials from environment variables ===
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
+
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+else:
+    twilio_client = None
+
+# Load existing users
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
         try:
@@ -28,23 +40,40 @@ def add_user():
     phone = data.get('phone')
     consent = data.get('consent')
 
-    if consent:
-        # Check if phone already exists to avoid duplicates
-        if not any(u['phone'] == phone for u in user_data):
-            user_data.append({
-                "address": address,
-                "phone": phone
-            })
-            with open(DATA_FILE, "w") as f:
-                json.dump(user_data, f, indent=2)
-            print(f"✅ Added user: {phone} at {address}")
-            return jsonify({"status": "success"}), 200
-        else:
-            print(f"ℹ️ User already exists: {phone}")
-            return jsonify({"status": "already_exists"}), 200
-    else:
+    if not consent:
         print(f"❌ Consent not given for: {phone}")
         return jsonify({"status": "consent_not_given"}), 403
+
+    if any(u['phone'] == phone for u in user_data):
+        print(f"ℹ️ User already exists: {phone}")
+        return jsonify({"status": "already_exists"}), 200
+
+    # Save new user
+    user_data.append({
+        "address": address,
+        "phone": phone
+    })
+    with open(DATA_FILE, "w") as f:
+        json.dump(user_data, f, indent=2)
+
+    print(f"✅ Added user: {phone} at {address}")
+
+    # Send WhatsApp confirmation
+    if twilio_client:
+        try:
+            twilio_client.messages.create(
+                from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                to=f"whatsapp:{phone}",
+                body=(
+                    f"Hi! You’re now signed up for the Lower Merion trash & recycling reminders. "
+                    f"We’ll send you a message the night before your trash day."
+                )
+            )
+            print(f"📩 WhatsApp confirmation sent to {phone}")
+        except Exception as e:
+            print(f"⚠️ Failed to send WhatsApp message: {e}")
+
+    return jsonify({"status": "success"}), 200
 
 @app.route('/users', methods=['GET'])
 def get_users():
