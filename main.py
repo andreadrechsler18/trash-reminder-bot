@@ -1,103 +1,128 @@
 from flask import Flask, request, jsonify
+import os, json, traceback
 from twilio.rest import Client
-import os
-import datetime
 
 app = Flask(__name__)
 
-# In-memory user store (replace with DB for production)
-users = []
+DATA_FILE = "users.json"
 
-# Load Twilio credentials from environment
-account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
-auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
-whatsapp_from = os.environ.get('TWILIO_WHATSAPP_FROM')
+# Load Twilio credentials from environment variables
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")  # should be like 'whatsapp:+14155238886'
 
-client = Client(account_sid, auth_token)
-
-@app.route('/')
-def home():
-    return "Trash Reminder Bot is running!"
-
-@app.route('/test_message')
-def test_message():
-    to = request.args.get('to')
-    if not to:
-        return "Missing 'to' parameter", 400
-
+# Create Twilio client only if creds exist
+twilio_client = None
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
     try:
-        message = client.messages.create(
-            body="This is a test WhatsApp message from Trash Reminder Bot!",
-            from_=whatsapp_from,
-            to=to
-        )
-        return f"Test message sent to {to}. Message SID: {message.sid}"
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     except Exception as e:
-        return f"Failed to send message: {str(e)}", 500
+        print("⚠️ Twilio client init failed:", e)
+        twilio_client = None
 
-@app.route('/add_user', methods=['POST'])
+# Load existing users from file
+if os.path.exists(DATA_FILE):
+    try:
+        with open(DATA_FILE, "r") as f:
+            user_data = json.load(f)
+    except Exception:
+        user_data = []
+else:
+    user_data = []
+
+
+def normalize_whatsapp_number(raw):
+    """Return a string like 'whatsapp:+13029812102' or None if invalid."""
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    # If already has whatsapp: prefix and plus, accept it
+    if raw.startswith("whatsapp:"):
+        num = raw.split("whatsapp:")[1]
+        if num.startswith("+"):
+            return "whatsapp:" + num
+        else:
+            return "whatsapp:+" + num if num.isdigit() else None
+
+    # Remove common formatting characters
+    stripped = "".join(ch for ch in raw if ch.isdigit() or ch == "+")
+    if stripped.startswith("+"):
+        return "whatsapp:" + stripped
+    # If input lacks +, assume US and prefix +1
+    if stripped.isdigit():
+        return "whatsapp:+1" + stripped if len(stripped) >= 7 else None
+    return None
+
+
+def parse_consent(raw):
+    """Return True if consent looks affirmative."""
+    if raw is None:
+        return False
+    s = str(raw).strip().lower()
+    return ("yes" in s) or ("agree" in s) or ("i agree" in s) or (s == "true")
+
+
+@app.route("/add_user", methods=["POST"])
 def add_user():
-    data = request.get_json()
-    if not data:
-        return "Missing JSON data", 400
+    try:
+        data = request.get_json(force=True, silent=True)
+        print("Received JSON payload:", data)
 
-    street_address = data.get('street_address')
-    phone_number = data.get('phone_number')
-    if phone_number and not phone_number.startswith('whatsapp:'):
-        #ensure leading plus sign
-        if not phone_number.startswith('+'):
-            phone_number = '+' + phone_number
-        phone_number = f"whatsapp:{phone_number}"
-    consent = data.get('consent')
+        if not data:
+            print("❌ No JSON payload or bad content-type.")
+            return jsonify({"error": "No JSON payload or bad content-type"}), 400
 
-    if not (street_address and phone_number and consent):
-        return "Missing required fields", 400
+        # Accept either 'street_address' or 'address' keys
+        address = data.get("street_address") or data.get("address") or data.get("addr")
+        phone = data.get("phone_number") or data.get("phone") or data.get("whatsapp")
+        consent_raw = data.get("consent")
 
-    # Simple check for duplicates
-    if any(u['phone_number'] == phone_number for u in users):
-        return "User already registered", 409
+        if not address or not phone:
+            return jsonify({"error": "Missing required fields (address or phone)"}), 400
 
-    users.append({
-        'street_address': street_address,
-        'phone_number': phone_number,
-        'consent': consent,
-        'added_at': datetime.datetime.datetime.datetime.now(datetime.timezone.utc).isoformat()
-    })
+        consent = parse_consent(consent_raw)
+        if not consent:
+            print(f"❌ Consent not given for phone {phone}")
+            return jsonify({"error": "Consent required"}), 403
 
-    return jsonify({"message": "User added successfully"}), 201
+        # Normalize phone into whatsapp:+E164 format
+        phone_whatsapp = normalize_whatsapp_number(phone)
+        if not phone_whatsapp:
+            return jsonify({"error": "Invalid phone number format"}), 400
 
-@app.route('/send_reminders')
-def send_reminders():
-    # Placeholder: you would add your logic here to:
-    # - Check today's date & holiday rules
-    # - Determine trash/recycling type per user address
-    # - Send WhatsApp reminders to each user who consented
+        # Prevent duplicate (compare normalized phone)
+        if any(u.get("phone") == phone_whatsapp for u in user_data):
+            print(f"ℹ️ User already exists: {phone_whatsapp}")
+            return jsonify({"status": "already_exists"}), 200
 
-    # For now, just simulate sending a reminder to all users
-    sent = 0
-    failed = 0
-    for user in users:
-        if user['consent'].lower() != 'yes':
-            continue
-        to = user['phone_number']
-        if not to.startswith('whatsapp:'):
-            to = f"whatsapp:{to}"
-        try:
-            client.messages.create(
-                body=f"Reminder: Trash day is tomorrow at {user['street_address']}. Don't forget to put out your bins!",
-                from_=whatsapp_from,
-                to=to
-            )
-            sent += 1
-        except Exception:
-            failed += 1
+        # Add user and persist
+        new_user = {"address": address, "phone": phone_whatsapp, "consent": True}
+        user_data.append(new_user)
+        with open(DATA_FILE, "w") as f:
+            json.dump(user_data, f, indent=2)
 
-    return jsonify({
-        "sent": sent,
-        "failed": failed,
-        "total": len(users)
-    })
+        print(f"✅ Added user: {phone_whatsapp} at {address}")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+        # Try to send confirmation via Twilio if configured
+        if twilio_client and TWILIO_WHATSAPP_FROM:
+            try:
+                msg = twilio_client.messages.create(
+                    from_=TWILIO_WHATSAPP_FROM,
+                    to=phone_whatsapp,
+                    body=("Hi — you've been signed up for Lower Merion trash & recycling reminders. "
+                          "Reply STOP to unsubscribe.")
+                )
+                print("📩 Twilio confirmation SID:", getattr(msg, "sid", None))
+            except Exception as e:
+                # Log but do not fail the whole request
+                print("⚠️ Twilio send error:", str(e))
+
+        return jsonify({"status": "success", "user": new_user}), 201
+
+    except Exception as e:
+        # Print full traceback to logs for debugging (remove in production)
+        tb = traceback.format_exc()
+        print("❌ Exception in /add_user:\n", tb)
+        return jsonify({"error": "internal_server_error", "trace": tb}), 500
+
 
