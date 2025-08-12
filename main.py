@@ -11,6 +11,10 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")  # should be like 'whatsapp:+14155238886'
 
+# --- ADDED for WhatsApp Sandbox ---
+TWILIO_SANDBOX_JOIN_CODE = os.environ.get("join settlers-sail")  
+# -----------------------------------
+
 # Create Twilio client only if creds exist
 twilio_client = None
 if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
@@ -36,7 +40,6 @@ def normalize_whatsapp_number(raw):
     if not raw:
         return None
     raw = str(raw).strip()
-    # If already has whatsapp: prefix and plus, accept it
     if raw.startswith("whatsapp:"):
         num = raw.split("whatsapp:")[1]
         if num.startswith("+"):
@@ -44,11 +47,9 @@ def normalize_whatsapp_number(raw):
         else:
             return "whatsapp:+" + num if num.isdigit() else None
 
-    # Remove common formatting characters
     stripped = "".join(ch for ch in raw if ch.isdigit() or ch == "+")
     if stripped.startswith("+"):
         return "whatsapp:" + stripped
-    # If input lacks +, assume US and prefix +1
     if stripped.isdigit():
         return "whatsapp:+1" + stripped if len(stripped) >= 7 else None
     return None
@@ -72,7 +73,6 @@ def add_user():
             print("❌ No JSON payload or bad content-type.")
             return jsonify({"error": "No JSON payload or bad content-type"}), 400
 
-        # Accept either 'street_address' or 'address' keys
         address = data.get("street_address") or data.get("address") or data.get("addr")
         phone = data.get("phone_number") or data.get("phone") or data.get("whatsapp")
         consent_raw = data.get("consent")
@@ -85,17 +85,14 @@ def add_user():
             print(f"❌ Consent not given for phone {phone}")
             return jsonify({"error": "Consent required"}), 403
 
-        # Normalize phone into whatsapp:+E164 format
         phone_whatsapp = normalize_whatsapp_number(phone)
         if not phone_whatsapp:
             return jsonify({"error": "Invalid phone number format"}), 400
 
-        # Prevent duplicate (compare normalized phone)
         if any(u.get("phone") == phone_whatsapp for u in user_data):
             print(f"ℹ️ User already exists: {phone_whatsapp}")
             return jsonify({"status": "already_exists"}), 200
 
-        # Add user and persist
         new_user = {"address": address, "phone": phone_whatsapp, "consent": True}
         user_data.append(new_user)
         with open(DATA_FILE, "w") as f:
@@ -106,23 +103,35 @@ def add_user():
         # Try to send confirmation via Twilio if configured
         if twilio_client and TWILIO_WHATSAPP_FROM:
             try:
+                # --- ADDED for WhatsApp Sandbox ---
+                body_text = (
+                    "Hi — you've been signed up for Lower Merion trash & recycling reminders. "
+                    "Reply STOP to unsubscribe."
+                )
+                if TWILIO_SANDBOX_JOIN_CODE:
+                    body_text = (
+                        f"Hi — you've been signed up for Lower Merion trash & recycling reminders.\n\n"
+                        f"⚠️ If you haven't joined the sandbox today, send this message to {TWILIO_WHATSAPP_FROM} on WhatsApp first:\n\n"
+                        f"{TWILIO_SANDBOX_JOIN_CODE}\n\n"
+                        "Reply STOP to unsubscribe."
+                    )
+                # -----------------------------------
+
                 msg = twilio_client.messages.create(
                     from_=TWILIO_WHATSAPP_FROM,
                     to=phone_whatsapp,
-                    body=("Hi — you've been signed up for Lower Merion trash & recycling reminders. "
-                          "Reply STOP to unsubscribe.")
+                    body=body_text
                 )
                 print("📩 Twilio confirmation SID:", getattr(msg, "sid", None))
             except Exception as e:
-                # Log but do not fail the whole request
                 print("⚠️ Twilio send error:", str(e))
 
         return jsonify({"status": "success", "user": new_user}), 201
 
     except Exception as e:
-        # Print full traceback to logs for debugging (remove in production)
         tb = traceback.format_exc()
         print("❌ Exception in /add_user:\n", tb)
         return jsonify({"error": "internal_server_error", "trace": tb}), 500
+
 
 
