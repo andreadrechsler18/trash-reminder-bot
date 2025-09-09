@@ -52,7 +52,6 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
     """
     Parse Lower Merion recycling PDF into:
         { datetime.date(YYYY, M, D): 'Paper' or 'Commingle' }
-    Supports multiple 'week beginning' dates in one cell.
     """
     if not os.path.exists(pdf_path):
         print(f"⚠ Recycling schedule PDF not found: {pdf_path}")
@@ -65,16 +64,17 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                if not table or len(table[0]) < 3:
-                    continue
-                # Expected: Month | Paper weeks | Commingle weeks
-                for row in table[1:]:
+                # skip header rows
+                for row in table:
+                    if not row or row[0] in ("Month", ""):
+                        continue
+
                     month_name = str(row[0]).strip()
                     if not month_name or month_name.lower() == "nan":
                         continue
 
-                    paper_weeks = str(row[1]).split(',')
-                    commingle_weeks = str(row[2]).split(',')
+                    paper_weeks = str(row[1]).split(',') if len(row) > 1 else []
+                    commingle_weeks = str(row[2]).split(',') if len(row) > 2 else []
 
                     for d in paper_weeks:
                         d = d.strip()
@@ -84,7 +84,7 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
                             day_num = clean_day_string(d)
                             week_start = datetime.strptime(f"{month_name} {day_num} {year}", "%B %d %Y").date()
                             schedule_map[week_start] = "Paper"
-                        except ValueError:
+                        except Exception:
                             pass
 
                     for d in commingle_weeks:
@@ -95,7 +95,7 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
                             day_num = clean_day_string(d)
                             week_start = datetime.strptime(f"{month_name} {day_num} {year}", "%B %d %Y").date()
                             schedule_map[week_start] = "Commingle"
-                        except ValueError:
+                        except Exception:
                             pass
 
     print(f"✅ Loaded recycling schedule with {len(schedule_map)} weeks.")
@@ -104,9 +104,16 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
 RECYCLING_SCHEDULE = load_recycling_schedule()
 
 def get_recycling_type_for_date(check_date):
-    """Find recycling type for the week of the given date."""
+    """
+    Given a date, return the recycling type (Paper/Commingle) for that week.
+    The township PDF uses 'Week Beginning' (Monday), so we align any date
+    to its week's Monday before lookup.
+    """
     monday = check_date - timedelta(days=check_date.weekday())
-    return RECYCLING_SCHEDULE.get(monday, "Recycling")
+    if monday in RECYCLING_SCHEDULE:
+        return RECYCLING_SCHEDULE[monday]
+    else:
+        return "Recycling"
 
 # ==== Township API ====
 def get_auth_token():
