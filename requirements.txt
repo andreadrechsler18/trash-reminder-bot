@@ -4,3 +4,6 @@ twilio
 pdfplumber
 pytz
 schedule
+requests
+apscheduler
+pdfminer.six
