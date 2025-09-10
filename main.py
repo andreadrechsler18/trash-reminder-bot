@@ -68,12 +68,12 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
 
 """
 def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
-    """
-    """
+"""
+"""
     Parse Lower Merion recycling PDF by text, not tables.
     Extracts month, paper weeks, commingle weeks.
-    """
-    """
+"""
+"""
     if not os.path.exists(pdf_path):
         print(f"⚠ Recycling schedule PDF not found: {pdf_path}")
         return {}
