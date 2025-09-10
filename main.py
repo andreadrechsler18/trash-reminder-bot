@@ -49,6 +49,25 @@ def clean_day_string(day_str):
     return int(re.sub(r'(st|nd|rd|th)$', '', day_str.strip().lower()))
 
 def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
+    if not os.path.exists(pdf_path):
+        print(f"⚠ Recycling schedule PDF not found: {pdf_path}")
+        return {}
+
+    year = 2025
+    schedule_map = {}
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text()
+            print(f"\n--- PAGE {page_num} TEXT START ---")
+            print(text)
+            print(f"--- PAGE {page_num} TEXT END ---\n")
+
+    print(f"✅ Loaded recycling schedule with {len(schedule_map)} weeks.")
+    return schedule_map
+
+"""
+def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
     """
     Parse Lower Merion recycling PDF by text, not tables.
     Extracts month, paper weeks, commingle weeks.
@@ -111,7 +130,7 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
 
     print(f"✅ Loaded recycling schedule with {len(schedule_map)} weeks.")
     return schedule_map
-
+"""
 
 RECYCLING_SCHEDULE = load_recycling_schedule()
 
