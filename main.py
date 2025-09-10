@@ -50,8 +50,8 @@ def clean_day_string(day_str):
 
 def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
     """
-    Parse Lower Merion recycling PDF into:
-        { datetime.date(YYYY, M, D): 'Paper' or 'Commingle' }
+    Parse Lower Merion recycling PDF by text, not tables.
+    Extracts month, paper weeks, commingle weeks.
     """
     if not os.path.exists(pdf_path):
         print(f"⚠ Recycling schedule PDF not found: {pdf_path}")
@@ -59,47 +59,59 @@ def load_recycling_schedule(pdf_path="recycling_schedule_2025.pdf"):
 
     schedule_map = {}
     year = 2025
+    months = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                # skip header rows
-                for row in table:
-                    if not row or row[0] in ("Month", ""):
-                        continue
+            text = page.extract_text()
+            if not text:
+                continue
+            for line in text.splitlines():
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                month = parts[0]
+                if month not in months:
+                    continue
 
-                    month_name = str(row[0]).strip()
-                    if not month_name or month_name.lower() == "nan":
-                        continue
+                # line looks like: "January   6th, 20th   13th, 27th"
+                try:
+                    row = line.split()
+                    # find month explicitly, then split remaining columns
+                    cols = line.split(month, 1)[1].strip()
+                    # split by two or more spaces (since paper/commingle are columns)
+                    cols_split = re.split(r"\s{2,}", cols)
+                    paper_str = cols_split[0] if len(cols_split) > 0 else ""
+                    commingle_str = cols_split[1] if len(cols_split) > 1 else ""
 
-                    paper_weeks = str(row[1]).split(',') if len(row) > 1 else []
-                    commingle_weeks = str(row[2]).split(',') if len(row) > 2 else []
+                    paper_weeks = [d.strip() for d in paper_str.split(",") if d.strip()]
+                    commingle_weeks = [d.strip() for d in commingle_str.split(",") if d.strip()]
 
                     for d in paper_weeks:
-                        d = d.strip()
-                        if not d or d.lower() == "nan":
-                            continue
                         try:
                             day_num = clean_day_string(d)
-                            week_start = datetime.strptime(f"{month_name} {day_num} {year}", "%B %d %Y").date()
+                            week_start = datetime.strptime(f"{month} {day_num} {year}", "%B %d %Y").date()
                             schedule_map[week_start] = "Paper"
                         except Exception:
                             pass
 
                     for d in commingle_weeks:
-                        d = d.strip()
-                        if not d or d.lower() == "nan":
-                            continue
                         try:
                             day_num = clean_day_string(d)
-                            week_start = datetime.strptime(f"{month_name} {day_num} {year}", "%B %d %Y").date()
+                            week_start = datetime.strptime(f"{month} {day_num} {year}", "%B %d %Y").date()
                             schedule_map[week_start] = "Commingle"
                         except Exception:
                             pass
 
+                except Exception as e:
+                    print(f"⚠ Parse error on line: {line} ({e})")
+
     print(f"✅ Loaded recycling schedule with {len(schedule_map)} weeks.")
     return schedule_map
+
 
 RECYCLING_SCHEDULE = load_recycling_schedule()
 
