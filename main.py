@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import pytz
 import requests
 import schedule
