@@ -85,14 +85,6 @@ def get_recycling_type_for_date(check_date):
 
 print(f"✅ Using static recycling schedule with {len(RECYCLING_SCHEDULE)} weeks.")
 
-# Build the runtime mapping (date objects -> type)
-RECYCLING_SCHEDULE = load_recycling_schedule()
-# get_recycling_type_for_date uses RECYCLING_SCHEDULE below as before:
-def get_recycling_type_for_date(check_date):
-    monday = check_date - timedelta(days=check_date.weekday())
-    return RECYCLING_SCHEDULE.get(monday, "Recycling")
-
-
 
 # ==== Township API ====
 def get_auth_token():
