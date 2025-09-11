@@ -44,146 +44,46 @@ def save_users(users):
 USERS = load_users()
 
 # ---------------------------
-# Robust recycling schedule loader (with static fallback)
+# Recycling schedule loader (static)
 # ---------------------------
-
-REMOTE_PDF_URL = "https://content.govdelivery.com/attachments/PALOWERMERION/2024/12/19/file_attachments/3108697/2025%20Recycling%20Schedule%20Final.pdf"
-
-# Static fallback mapping (ISO date -> type) built from the official PDF table you provided
-RECYCLING_SCHEDULE_STATIC = {
-  "2025-01-06": "Paper", "2025-01-13": "Commingled", "2025-01-20": "Paper", "2025-01-27": "Commingled",
-  "2025-02-03": "Paper", "2025-02-10": "Commingled", "2025-02-17": "Paper", "2025-02-24": "Commingled",
-  "2025-03-03": "Paper", "2025-03-10": "Commingled", "2025-03-17": "Paper", "2025-03-24": "Commingled", "2025-03-31": "Paper",
-  "2025-04-07": "Commingle", "2025-04-14": "Paper", "2025-04-21": "Commingle", "2025-04-28": "Paper",
-  "2025-05-05": "Commingle", "2025-05-12": "Paper", "2025-05-19": "Commingle", "2025-05-26": "Paper",
-  "2025-06-02": "Commingle", "2025-06-09": "Paper", "2025-06-16": "Commingle", "2025-06-23": "Paper", "2025-06-30": "Commingle",
-  "2025-07-07": "Paper", "2025-07-14": "Commingle", "2025-07-21": "Paper", "2025-07-28": "Commingle",
-  "2025-08-04": "Paper", "2025-08-11": "Commingle", "2025-08-18": "Paper", "2025-08-25": "Commingle",
-  "2025-09-01": "Paper", "2025-09-08": "Commingle", "2025-09-15": "Paper", "2025-09-22": "Commingle", "2025-09-29": "Paper",
-  "2025-10-06": "Commingle", "2025-10-13": "Paper", "2025-10-20": "Commingle", "2025-10-27": "Paper",
-  "2025-11-03": "Commingle", "2025-11-10": "Paper", "2025-11-17": "Commingle", "2025-11-24": "Paper",
-  "2025-12-01": "Commingle", "2025-12-08": "Paper", "2025-12-15": "Commingle", "2025-12-22": "Paper", "2025-12-29": "Commingle"
+# Static 2025 schedule from Lower Merion Township PDF
+RECYCLING_SCHEDULE = {
+    date(2025, 1, 6): "Paper",      date(2025, 1, 13): "Commingled",
+    date(2025, 1, 20): "Paper",     date(2025, 1, 27): "Commingled",
+    date(2025, 2, 3): "Paper",      date(2025, 2, 10): "Commingled",
+    date(2025, 2, 17): "Paper",     date(2025, 2, 24): "Commingled",
+    date(2025, 3, 3): "Paper",      date(2025, 3, 10): "Commingled",
+    date(2025, 3, 17): "Paper",     date(2025, 3, 24): "Commingled",
+    date(2025, 3, 31): "Paper",
+    date(2025, 4, 7): "Commingled", date(2025, 4, 14): "Paper",
+    date(2025, 4, 21): "Commingled",date(2025, 4, 28): "Paper",
+    date(2025, 5, 5): "Commingled", date(2025, 5, 12): "Paper",
+    date(2025, 5, 19): "Commingled",date(2025, 5, 26): "Paper",
+    date(2025, 6, 2): "Commingled", date(2025, 6, 9): "Paper",
+    date(2025, 6, 16): "Commingled",date(2025, 6, 23): "Paper",
+    date(2025, 6, 30): "Commingled",
+    date(2025, 7, 7): "Paper",      date(2025, 7, 14): "Commingled",
+    date(2025, 7, 21): "Paper",     date(2025, 7, 28): "Commingled",
+    date(2025, 8, 4): "Paper",      date(2025, 8, 11): "Commingled",
+    date(2025, 8, 18): "Paper",     date(2025, 8, 25): "Commingled",
+    date(2025, 9, 1): "Paper",      date(2025, 9, 8): "Commingled",
+    date(2025, 9, 15): "Paper",     date(2025, 9, 22): "Commingled",
+    date(2025, 9, 29): "Paper",
+    date(2025, 10, 6): "Commingled",date(2025, 10, 13): "Paper",
+    date(2025, 10, 20): "Commingled",date(2025, 10, 27): "Paper",
+    date(2025, 11, 3): "Commingled",date(2025, 11, 10): "Paper",
+    date(2025, 11, 17): "Commingled",date(2025, 11, 24): "Paper",
+    date(2025, 12, 1): "Commingled",date(2025, 12, 8): "Paper",
+    date(2025, 12, 15): "Commingled",date(2025, 12, 22): "Paper",
+    date(2025, 12, 29): "Commingled",
 }
 
-def clean_day_string(day_str):
-    """Remove ordinal suffix and convert to int if possible."""
-    try:
-        return int(re.sub(r'(st|nd|rd|th)$', '', day_str.strip().lower()))
-    except Exception:
-        raise
+def get_recycling_type_for_date(check_date):
+    """Return recycling type for the week containing check_date."""
+    monday = check_date - timedelta(days=check_date.weekday())
+    return RECYCLING_SCHEDULE.get(monday, "Recycling")
 
-def parse_text_lines_into_schedule(text, year=2025):
-    """
-    Parse lines of text extracted from the PDF and return a dict:
-      { datetime.date(...) : "Paper" | "Commingled" }
-    This accepts lines like: "January   6th, 20th   13th, 27th"
-    """
-    schedule_map = {}
-    months = {
-        "January":1,"February":2,"March":3,"April":4,"May":5,"June":6,
-        "July":7,"August":8,"September":9,"October":10,"November":11,"December":12
-    }
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # Try to detect a leading month name
-        parts = line.split()
-        first = parts[0]
-        if first not in months:
-            continue
-
-        month_name = first
-        # Attempt to split remainder into two columns by two-or-more spaces
-        remainder = line.split(month_name,1)[1].strip()
-        cols = re.split(r"\s{2,}", remainder)
-        paper_col = cols[0] if len(cols)>0 else ""
-        comm_col = cols[1] if len(cols)>1 else ""
-
-        paper_dates = [p.strip() for p in paper_col.split(",") if p.strip()]
-        comm_dates  = [c.strip() for c in comm_col.split(",") if c.strip()]
-
-        for d in paper_dates:
-            try:
-                day = clean_day_string(d)
-                dt = datetime.strptime(f"{month_name} {day} {year}", "%B %d %Y").date()
-                schedule_map[dt] = "Paper"
-            except Exception:
-                # ignore unparsable tokens
-                continue
-        for d in comm_dates:
-            try:
-                day = clean_day_string(d)
-                dt = datetime.strptime(f"{month_name} {day} {year}", "%B %d %Y").date()
-                schedule_map[dt] = "Commingled"
-            except Exception:
-                continue
-
-    return schedule_map
-
-def try_pdfplumber_extract(pdf_path):
-    """Return concatenated text from pdfplumber pages or empty str."""
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            texts = []
-            for i, page in enumerate(pdf.pages, start=1):
-                t = page.extract_text() or ""
-                texts.append(t)
-            return "\n".join(texts)
-    except Exception as e:
-        print("pdfplumber error:", e)
-        return ""
-
-def load_recycling_schedule(pdf_path_local="recycling_schedule_2025.pdf"):
-    """
-    Robust loader: try local file -> try remote file -> fallback to STATIC mapping.
-    Returns a dict keyed with datetime.date objects.
-    """
-    schedule_map = {}
-    # 1) try local file
-    if os.path.exists(pdf_path_local):
-        print(f"Attempting to parse local PDF: {pdf_path_local}")
-        text = try_pdfplumber_extract(pdf_path_local)
-        if text and len(text.strip())>20:
-            schedule_map = parse_text_lines_into_schedule(text)
-            print("Parsed local PDF text length:", len(text))
-        else:
-            print("Local PDF text extraction returned empty or too short.")
-    else:
-        print("Local PDF not found:", pdf_path_local)
-
-    # 2) if still empty, try remote PDF download and parse
-    if not schedule_map:
-        try:
-            print("Attempting to download remote official PDF for parsing...")
-            r = requests.get(REMOTE_PDF_URL, timeout=15)
-            if r.status_code == 200 and len(r.content)>1000:
-                tmp_path = "/tmp/remote_recycling_schedule.pdf"
-                with open(tmp_path, "wb") as f:
-                    f.write(r.content)
-                text = try_pdfplumber_extract(tmp_path)
-                if text and len(text.strip())>20:
-                    schedule_map = parse_text_lines_into_schedule(text)
-                    print("Parsed remote PDF text length:", len(text))
-                else:
-                    print("Remote PDF text extraction returned empty or too short.")
-            else:
-                print("Failed to download remote PDF or file too small, status:", r.status_code)
-        except Exception as e:
-            print("Error downloading/parsing remote PDF:", e)
-
-    # 3) Fallback to static mapping if still empty
-    if not schedule_map:
-        print("⚠ Falling back to static built-in schedule (2025).")
-        for iso, t in RECYCLING_SCHEDULE_STATIC.items():
-            schedule_map[datetime.fromisoformat(iso).date()] = t
-        print(f"✅ Using static recycling schedule with {len(schedule_map)} weeks.")
-
-    else:
-        print(f"✅ Loaded recycling schedule with {len(schedule_map)} weeks from PDF parsing.")
-
-    return schedule_map
+print(f"✅ Using static recycling schedule with {len(RECYCLING_SCHEDULE)} weeks.")
 
 # Build the runtime mapping (date objects -> type)
 RECYCLING_SCHEDULE = load_recycling_schedule()
