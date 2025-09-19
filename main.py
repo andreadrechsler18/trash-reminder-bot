@@ -7,8 +7,9 @@ import schedule
 import time
 import re
 import pdfplumber
-from flask import Flask, request
+from flask import Flask, request, Response
 from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
 
 # ==== Twilio Config ====
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -195,6 +196,81 @@ def webhook():
         return {"status": "ok"}
     else:
         return {"status": "error", "message": "Consent not given"}, 400
+
+# Replace <FORM_URL> with your Google Form URL (or remove the link text)
+FORM_URL = "https://forms.gle/ziXa2nyFr9Mdtgbw8"
+
+@app.route("/whatsapp_webhook", methods=["POST"])
+def whatsapp_webhook():
+    # Debug: print incoming form values (you'll see this in Render logs)
+    print("Twilio incoming webhook:", dict(request.form))
+
+    from_number = request.form.get("From")  # e.g. "whatsapp:+13029812102"
+    body = (request.form.get("Body") or "").strip()
+    resp = MessagingResponse()
+
+    # Basic safety
+    if not from_number:
+        resp.message("No sender number detected.")
+        return Response(str(resp), mimetype="application/xml")
+
+    lower = body.lower()
+
+    # Unsubscribe: user texts STOP
+    if "stop" in lower and len(lower) <= 10:
+        removed = False
+        for u in USERS:
+            if u.get("phone_number") == from_number:
+                USERS.remove(u)
+                save_users(USERS)
+                removed = True
+                break
+        if removed:
+            resp.message("You have been unsubscribed from Trash reminders. To re-subscribe, use the Google Form or reply START.")
+        else:
+            resp.message("We couldn't find your subscription. To sign up, please fill the Google Form: " + FORM_URL)
+        return Response(str(resp), mimetype="application/xml")
+
+    # Quick info: what's recycling this week
+    if "recycl" in lower:
+        tz = pytz.timezone("US/Eastern")
+        today = datetime.now(tz).date()
+        recycling = get_recycling_type_for_date(today)
+        resp.message(
+            f"This week is *{recycling}* recycling.\n"
+            f"To receive nightly reminders the evening before your pickup, sign up here: {FORM_URL}"
+        )
+        return Response(str(resp), mimetype="application/xml")
+
+    # Quick info: trash/pickup day (uses stored user info)
+    if any(k in lower for k in ("trash", "pickup", "garbage")):
+        user = next((u for u in USERS if u.get("phone_number") == from_number), None)
+        if user:
+            tz = pytz.timezone("US/Eastern")
+            tomorrow = datetime.now(tz).date() + timedelta(days=1)
+            rec_type = get_recycling_type_for_date(tomorrow)
+            addr = user.get("street_address")
+            zone = lookup_zone_by_address(addr) if addr else None
+            holiday_note = get_next_holiday_shift(zone) if zone else None
+
+            msg = f"Tomorrow is trash day for {addr} ({zone}).\nRecycling: {rec_type}."
+            if holiday_note:
+                msg += f"\nNote: {holiday_note}"
+            resp.message(msg)
+        else:
+            resp.message(
+                "I don't have you on file. To subscribe, please use the Google Form: "
+                f"{FORM_URL}\nOr reply with: JOIN <your address> (if you'd like in-chat signup)."
+            )
+        return Response(str(resp), mimetype="application/xml")
+
+    # Default/help reply
+    resp.message(
+        "Hi — I can tell you whether it's Paper or Commingled recycling this week, "
+        "and send nightly reminders. Try:\n• \"What's recycling this week?\"\n• \"When's trash pickup?\"\n• \"STOP\" to unsubscribe."
+    )
+    return Response(str(resp), mimetype="application/xml")
+
 
 # ==== Schedule job ====
 schedule.every().monday.at("19:00").do(send_weekly_reminders)
