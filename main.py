@@ -29,6 +29,32 @@ ZONE_URLS = {
     "Zone 4": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-four"
 }
 
+# --- WhatsApp template helper  ---
+import os, json
+from twilio.rest import Client
+
+# read from env (already set in Render Web + Cron)
+TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
+TWILIO_AUTH_TOKEN  = os.environ["TWILIO_AUTH_TOKEN"]
+TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
+
+def send_whatsapp_template(to: str, template_sid: str, variables: dict | None = None):
+    """
+    Send a WhatsApp *template* (approved in Twilio Content).
+    - to: 'whatsapp:+1XXXXXXXXXX'
+    - template_sid: the HX... Content SID
+    - variables: dict of {"1": "value for {{1}}", "2": "..."} as strings
+    """
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return client.messages.create(
+        from_=TWILIO_WHATSAPP_FROM,
+        to=to,
+        content_sid=template_sid,
+        content_variables=json.dumps(variables or {})
+    )
+# --- end helper ---
+
+
 # ==== Storage (in-memory for now) ====
 USERS_FILE = "users.json"
 
@@ -271,6 +297,17 @@ def whatsapp_webhook():
     )
     return Response(str(resp), mimetype="application/xml")
 
+# --- TEMP TEST ROUTE: remove after testing ---
+@app.route("/test_welcome")
+def test_welcome():
+    from os import environ as env
+    send_whatsapp_template(
+        to="whatsapp:+1YOURNUMBER",                # <- put your phone here
+        template_sid=env["TWILIO_TEMPLATE_SID_WELCOME"],
+        variables={}                               # welcome has no variables
+    )
+    return "OK"
+# --- END TEMP ROUTE ---
 
 # ==== Schedule job ====
 schedule.every().monday.at("19:00").do(send_weekly_reminders)
