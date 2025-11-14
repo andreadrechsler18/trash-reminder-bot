@@ -301,12 +301,12 @@ def whatsapp_webhook():
 @app.route("/test_welcome")
 def test_welcome():
     from os import environ as env
-    send_whatsapp_template(
-        to="whatsapp:+13029812102",                # <- put your phone here
-        template_sid=env["TWILIO_TEMPLATE_SID_WELCOME"],
-        variables={}                               # welcome has no variables
+    msg = send_whatsapp_template(
+        to="whatsapp:+13029812102",
+        template_sid=env["TWILIO_TEMPLATE_SID_WELCOME"],  # must be the HX... for the WhatsApp-approved “welcome” template
+        variables={}
     )
-    return "OK"
+    return f"OK, SID={msg.sid}"
 # --- END TEMP ROUTE ---
 
 # ==== Schedule job ====
