@@ -302,7 +302,7 @@ def whatsapp_webhook():
 def test_welcome():
     from os import environ as env
     send_whatsapp_template(
-        to="whatsapp:+1YOURNUMBER",                # <- put your phone here
+        to="whatsapp:+13029812102",                # <- put your phone here
         template_sid=env["TWILIO_TEMPLATE_SID_WELCOME"],
         variables={}                               # welcome has no variables
     )
