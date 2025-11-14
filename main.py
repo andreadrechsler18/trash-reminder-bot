@@ -14,7 +14,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 # ==== Twilio Config ====
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = "whatsapp:+14155238886"
+TWILIO_WHATSAPP_FROM = "whatsapp:+6106382707"
 
 # ==== Lower Merion Config ====
 TOKEN_URL = "https://www.lowermerion.org/Home/GetToken"
