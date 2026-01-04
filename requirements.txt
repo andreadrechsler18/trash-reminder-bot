@@ -7,3 +7,5 @@ schedule
 requests
 apscheduler
 pdfminer.six
+beautifulsoup4>=4.12,<5
+lxml>=5,<6
