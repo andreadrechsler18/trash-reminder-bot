@@ -1,323 +1,472 @@
 import os
 import json
+import re
 from datetime import date, datetime, timedelta
+from typing import Optional, Dict, Any
+
 import pytz
 import requests
-import schedule
-import time
-import re
-import pdfplumber
 from flask import Flask, request, Response
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
-# ==== Twilio Config ====
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = "whatsapp:+6106382707"
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration & Environment
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ==== Lower Merion Config ====
-TOKEN_URL = "https://www.lowermerion.org/Home/GetToken"
+# Twilio (must be set in Render → Environment for both Web and Cron services)
+TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
+TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
+# e.g. whatsapp:+16107728845  (← set this to your new business sender)
+TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
+
+# Template SIDs (Twilio Content API HX… values) — set these in env.
+TWILIO_TEMPLATE_SID_WEEKLY_BASIC   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
+TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
+TWILIO_TEMPLATE_SID_WELCOME        = os.environ.get("TWILIO_TEMPLATE_SID_WELCOME", "")
+
+# Lower Merion endpoints
+TOKEN_URL  = "https://www.lowermerion.org/Home/GetToken"
 SEARCH_URL = "https://flex.visioninternet.com/api/FeFlexComponent/Get"
-COMPONENT_GUID = "f05e2a62-e807-4f30-b450-c2c48770ba5c"
-LIST_UNIQUE_NAME = "VHWQOE27X21B7R8"
+COMPONENT_GUID     = "f05e2a62-e807-4f30-b450-c2c48770ba5c"
+LIST_UNIQUE_NAME   = "VHWQOE27X21B7R8"
 
-ZONE_URLS = {
+ZONE_URLS: Dict[str, str] = {
     "Zone 1": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-one",
     "Zone 2": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-two",
     "Zone 3": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-three",
-    "Zone 4": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-four"
+    "Zone 4": "https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection/holiday-collection-zone-four",
 }
 
-# --- WhatsApp template helper  ---
-import os, json
-from twilio.rest import Client
-
-# read from env (already set in Render Web + Cron)
-TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_AUTH_TOKEN  = os.environ["TWILIO_AUTH_TOKEN"]
-TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
-
-def send_whatsapp_template(to: str, template_sid: str, variables: dict | None = None):
-    """
-    Send a WhatsApp *template* (approved in Twilio Content).
-    - to: 'whatsapp:+1XXXXXXXXXX'
-    - template_sid: the HX... Content SID
-    - variables: dict of {"1": "value for {{1}}", "2": "..."} as strings
-    """
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    return client.messages.create(
-        from_=TWILIO_WHATSAPP_FROM,
-        to=to,
-        content_sid=template_sid,
-        content_variables=json.dumps(variables or {})
-    )
-# --- end helper ---
-
-
-# ==== Storage (in-memory for now) ====
+# Storage
 USERS_FILE = "users.json"
 
-def load_users():
+# Public opt-in form (optional, shown in /whatsapp_webhook help text)
+FORM_URL = os.environ.get("PUBLIC_SIGNUP_URL", "https://forms.gle/your-google-form-id")
+
+# 2026 recycling: seed the FIRST "Paper" Monday (adjust to match LM 2026 PDF).
+# The LM schedule is alternate-week Paper/Commingled; holiday shifts handled separately.
+# Use the first Monday that is labeled "Week Beginning" under Paper in the 2026 PDF you linked.
+# The Monday for Jan 5, 2026 is a reasonable default; update once you confirm the PDF’s first Paper Monday.
+RECYCLE_2026_FIRST_PAPER_ISO = os.environ.get("RECYCLE_2026_FIRST_PAPER_ISO", "2026-01-05")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilities
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_auth_token() -> str:
+    """Fetch the JWT used by LM’s component API. Handles JSON and quoted-string responses."""
+    r = requests.get(TOKEN_URL, timeout=10)
+    r.raise_for_status()
+    try:
+        data = r.json()
+        tok = data.get("access_token") or data.get("token")
+        if tok:
+            return tok
+    except ValueError:
+        pass
+    return r.text.strip().strip('"').strip()
+
+def normalize_whatsapp_number(raw: Optional[str], default_cc: str = "+1") -> str:
+    """Return 'whatsapp:+1xxxxxxxxxx' from assorted inputs."""
+    if not raw:
+        return ""
+    s = re.sub(r"[^\d+]", "", raw)
+    if not s:
+        return ""
+    if not s.startswith("+"):
+        s = default_cc + s
+    return f"whatsapp:{s}"
+
+UNIT_TOKENS = r"(?:apt|apartment|unit|ste|suite|#|fl|floor|bldg|building)"
+def street_number_and_name(addr: Optional[str]) -> str:
+    """Extract just 'number + street name' from a full address."""
+    if not addr:
+        return ""
+    a = addr.strip()
+    if re.search(r"\bP\.?\s*O\.?\s*Box\b", a, flags=re.I):
+        return a.split(",")[0].strip()
+    first = a.split(",")[0]
+    first = re.sub(rf"\b{UNIT_TOKENS}\b.*$", "", first, flags=re.I).strip()
+    return re.sub(r"\s{2,}", " ", first)
+
+def build_alternating_schedule(start_monday: date, weeks: int = 53) -> Dict[date, str]:
+    """Alternate Paper/Commingled by week, starting with Paper on start_monday."""
+    sched: Dict[date, str] = {}
+    for i in range(weeks):
+        d = start_monday + timedelta(weeks=i)
+        sched[d] = "Paper" if i % 2 == 0 else "Commingled"
+    return sched
+
+def monday_of(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Lower Merion lookups
+# ──────────────────────────────────────────────────────────────────────────────
+
+def lookup_zone_by_address(address: str) -> Optional[str]:
+    """Return 'Zone 1'..'Zone 4' for a given street address via LM component API."""
+    if not address:
+        return None
+    try:
+        token = get_auth_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json;charset=UTF-8",
+            "Origin": "https://www.lowermerion.org",
+        }
+        payload = {
+            "pageSize": 20,
+            "pageNumber": 1,
+            "sortOptions": [],
+            "searchText": address,
+            "searchFields": ["Address"],
+            "searchOperator": "OR",
+            "searchSeparator": ",",
+            "filterOptions": [],
+            "Data": {"componentGuid": COMPONENT_GUID, "listUniqueName": LIST_UNIQUE_NAME},
+        }
+        resp = requests.post(SEARCH_URL, headers=..., json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("items") or data.get("Items") or data.get("Data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("Items", [])
+        for row in rows:
+            # Try direct field names first
+            for k in ("Refuse & Recycling Holiday Zone", "Holiday Zone", "Zone", "RefuseZone"):
+                v = row.get(k)
+                if isinstance(v, str) and "zone" in v.lower():
+                    return v.strip().title()
+            # Otherwise scan any string field
+            for v in row.values():
+                if isinstance(v, str) and "zone" in v.lower():
+                    return v.strip().title()
+    except Exception as e:
+        print("lookup_zone_by_address error:", e)
+    return None
+
+def get_next_holiday_shift(zone: Optional[str], ref_date: Optional[date] = None) -> Optional[str]:
+    """
+    Return a short note like 'Labor Day: collection on Wednesday.' for the ISO week containing ref_date.
+    Looks up the 'Holiday Collection – Zone X' page, reads the table (Date | Holiday | New Collection Day).
+    Falls back to regex if bs4 isn't available.
+    """
+    if not zone or zone not in ZONE_URLS:
+        return None
+
+    if ref_date is None:
+        ref_date = datetime.now(pytz.timezone("US/Eastern")).date()
+
+    try:
+        html = requests.get(ZONE_URLS[zone], timeout=15).text
+    except Exception as e:
+        print("holiday fetch error:", e)
+        return None
+
+    week_mon = ref_date - timedelta(days=ref_date.weekday())
+    week_sun = week_mon + timedelta(days=6)
+
+    # --- helper to parse date strings we might see on the page
+    def parse_dt(s: str) -> Optional[date]:
+        s = s.strip()
+        for fmt in ("%A, %B %d, %Y", "%B %d, %Y"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except ValueError:
+                pass
+        return None
+
+    # --- Preferred: parse the table with BeautifulSoup
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+        soup = BeautifulSoup(html, "html.parser")
+        table = soup.find("table")
+        if table:
+            for tr in table.find_all("tr"):
+                cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+                if len(cells) < 2:
+                    continue
+                # Try to locate a date in the first 1–2 cells
+                dt = parse_dt(cells[0]) or (parse_dt(cells[1]) if len(cells) > 1 else None)
+                if not dt:
+                    continue
+                if not (week_mon <= dt <= week_sun):
+                    continue
+
+                # Guess the holiday name & target weekday from remaining cells
+                holiday_name = ""
+                if len(cells) >= 2:
+                    # Prefer the cell that's not the date cell
+                    holiday_name = cells[1] if parse_dt(cells[0]) else cells[0]
+
+                mday = re.search(r"(Monday|Tuesday|Wednesday|Thursday|Friday)", " ".join(cells[1:]), re.I)
+                if mday:
+                    new_day = mday.group(1).title()
+                    name = holiday_name or "Holiday"
+                    return f"{name}: collection on {new_day}."
+                else:
+                    name = holiday_name or dt.strftime("%b %d")
+                    return f"{name}: collection may shift."
+    except Exception as e:
+        print("bs4 holiday parse error:", e)
+
+    # --- Fallback: regex over the raw HTML if a table parse wasn't possible
+    yr = ref_date.year
+    # capture 'Holiday Name' near the date, and a weekday somewhere after
+    pat = rf"(?P<name>[A-Za-z&\-\s]{{3,}})?[^<]{{0,120}}(?P<date>(?:Monday,\s*)?[A-Za-z]+\s+\d{{1,2}},\s*{yr}).{{0,220}}?(?P<weekday>Monday|Tuesday|Wednesday|Thursday|Friday)"
+    for m in re.finditer(pat, html, flags=re.I | re.S):
+        ds = m.group("date")
+        dt = parse_dt(ds) or parse_dt(re.sub(r"^Monday,\s*", "", ds))
+        if not dt:
+            continue
+        if not (week_mon <= dt <= week_sun):
+            continue
+        name = (m.group("name") or "").strip()
+        name = re.sub(r"\s+", " ", name)
+        # Clean obvious boilerplate fragments that aren't holiday names
+        if not name or len(name) < 3 or re.search(r"(date|holiday|collection|week|zone)", name, re.I):
+            name = "Holiday"
+        new_day = m.group("weekday").title()
+        return f"{name}: collection on {new_day}."
+
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Recycling schedule (2025 fallback + 2026 generated by seed)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# If you still want the published 2025 map, keep it here (truncated example):
+# RECYCLING_SCHEDULE_2025 = {date(2025,1,6):"Paper", date(2025,1,13):"Commingled", ...}
+
+def parse_iso(d: str) -> date:
+    y, m, d_ = d.split("-")
+    return date(int(y), int(m), int(d_))
+
+# Seed 2026 alternating schedule from first Paper-Monday
+try:
+    FIRST_PAPER_2026 = parse_iso(RECYCLE_2026_FIRST_PAPER_ISO)
+except Exception:
+    FIRST_PAPER_2026 = date(2026, 1, 5)  # safe default; adjust if LM PDF differs
+
+RECYCLING_SCHEDULE: Dict[date, str] = {
+    # **Optionally** include 2025 fallback here if you want two-year horizon.
+    # **Else** rely on 2026 generator + future-year extension via the same pattern.
+    **build_alternating_schedule(FIRST_PAPER_2026, weeks=53),
+}
+
+def get_recycling_type_for_date(d: date) -> str:
+    """Return 'Paper' or 'Commingled' for the Monday of the week containing date d."""
+    monday = monday_of(d)
+    return RECYCLING_SCHEDULE.get(monday, "Paper")  # default to Paper if missing
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Messaging helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+_twilio_client = None
+def twilio_client() -> Client:
+    global _twilio_client
+    if _twilio_client is None:
+        _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _twilio_client
+
+def send_whatsapp_template(to: str, template_sid: str, variables: Optional[Dict[str, Any]] = None):
+    """Send a WhatsApp *template* via Twilio Content API."""
+    if not template_sid:
+        raise RuntimeError("Template SID not configured in environment.")
+    payload = {
+        "from_": TWILIO_WHATSAPP_FROM,
+        "to": to,
+        "content_sid": template_sid,
+        "content_variables": json.dumps(variables or {}),
+    }
+    return twilio_client().messages.create(**payload)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_users() -> list[dict]:
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except Exception:
+                return []
     return []
 
-def save_users(users):
+def save_users(users: list[dict]) -> None:
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, indent=2)
 
-USERS = load_users()
+USERS: list[dict] = load_users()
 
-# ---------------------------
-# Recycling schedule loader (static)
-# ---------------------------
-# Static 2025 schedule from Lower Merion Township PDF
-RECYCLING_SCHEDULE = {
-    date(2025, 1, 6): "Paper",      date(2025, 1, 13): "Commingled",
-    date(2025, 1, 20): "Paper",     date(2025, 1, 27): "Commingled",
-    date(2025, 2, 3): "Paper",      date(2025, 2, 10): "Commingled",
-    date(2025, 2, 17): "Paper",     date(2025, 2, 24): "Commingled",
-    date(2025, 3, 3): "Paper",      date(2025, 3, 10): "Commingled",
-    date(2025, 3, 17): "Paper",     date(2025, 3, 24): "Commingled",
-    date(2025, 3, 31): "Paper",
-    date(2025, 4, 7): "Commingled", date(2025, 4, 14): "Paper",
-    date(2025, 4, 21): "Commingled",date(2025, 4, 28): "Paper",
-    date(2025, 5, 5): "Commingled", date(2025, 5, 12): "Paper",
-    date(2025, 5, 19): "Commingled",date(2025, 5, 26): "Paper",
-    date(2025, 6, 2): "Commingled", date(2025, 6, 9): "Paper",
-    date(2025, 6, 16): "Commingled",date(2025, 6, 23): "Paper",
-    date(2025, 6, 30): "Commingled",
-    date(2025, 7, 7): "Paper",      date(2025, 7, 14): "Commingled",
-    date(2025, 7, 21): "Paper",     date(2025, 7, 28): "Commingled",
-    date(2025, 8, 4): "Paper",      date(2025, 8, 11): "Commingled",
-    date(2025, 8, 18): "Paper",     date(2025, 8, 25): "Commingled",
-    date(2025, 9, 1): "Paper",      date(2025, 9, 8): "Commingled",
-    date(2025, 9, 15): "Paper",     date(2025, 9, 22): "Commingled",
-    date(2025, 9, 29): "Paper",
-    date(2025, 10, 6): "Commingled",date(2025, 10, 13): "Paper",
-    date(2025, 10, 20): "Commingled",date(2025, 10, 27): "Paper",
-    date(2025, 11, 3): "Commingled",date(2025, 11, 10): "Paper",
-    date(2025, 11, 17): "Commingled",date(2025, 11, 24): "Paper",
-    date(2025, 12, 1): "Commingled",date(2025, 12, 8): "Paper",
-    date(2025, 12, 15): "Commingled",date(2025, 12, 22): "Paper",
-    date(2025, 12, 29): "Commingled",
-}
+# ──────────────────────────────────────────────────────────────────────────────
+# Flask app & routes
+# ──────────────────────────────────────────────────────────────────────────────
 
-def get_recycling_type_for_date(check_date):
-    """Return recycling type for the week containing check_date."""
-    monday = check_date - timedelta(days=check_date.weekday())
-    return RECYCLING_SCHEDULE.get(monday, "Recycling")
+app = Flask(__name__)
 
-print(f"✅ Using static recycling schedule with {len(RECYCLING_SCHEDULE)} weeks.")
+@app.route("/", methods=["POST"])
+def webhook():
+    """Google Form → Webhook: expects JSON with street_address, phone_number, consent."""
+    data = request.get_json(force=True)
+    print("Received JSON payload:", data)
 
+    raw_phone = (data.get("phone_number") or data.get("phone") or "").strip()
+    address   = (data.get("street_address") or data.get("address") or "").strip()
+    consent   = (data.get("consent") or "").strip().lower()
 
-# ==== Township API ====
-def get_auth_token():
-    r = requests.get(TOKEN_URL)
-    r.raise_for_status()
-    return r.json().get("access_token")
+    if not raw_phone or not address:
+        return {"status": "error", "message": "Missing phone or address"}, 400
+    if "agree" not in consent:
+        return {"status": "error", "message": "Consent not granted"}, 400
 
-def lookup_zone_by_address(address):
-    token = get_auth_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json;charset=UTF-8",
-        "Origin": "https://www.lowermerion.org",
-        "Referer": "https://www.lowermerion.org/"
-    }
-    payload = {
-        "pageSize": 20,
-        "pageNumber": 1,
-        "sortOptions": [],
-        "searchText": address,
-        "searchFields": ["Address"],
-        "searchOperator": "OR",
-        "searchSeparator": ",",
-        "filterOptions": [],
-        "Data": {
-            "componentGuid": COMPONENT_GUID,
-            "listUniqueName": LIST_UNIQUE_NAME
-        }
-    }
-    resp = requests.post(SEARCH_URL, headers=headers, json=payload)
-    resp.raise_for_status()
-    results = resp.json().get("Data", {}).get("Items", [])
-    if not results:
-        return None
-    for item in results:
-        if "Zone" in item:
-            return item["Zone"]
-    return None
+    phone = normalize_whatsapp_number(raw_phone)
+    if not phone:
+        return {"status": "error", "message": "Invalid phone"}, 400
 
-# ==== Holiday Shift Checker ====
-def get_next_holiday_shift(zone):
-    if zone not in ZONE_URLS:
-        return None
-    url = ZONE_URLS[zone]
-    r = requests.get(url)
-    r.raise_for_status()
-    html = r.text
-    matches = re.findall(r"(\w+ \d{1,2}, 2025).*?([Mm]onday|[Tt]uesday|[Ww]ednesday|[Tt]hursday|[Ff]riday)", html, re.S)
-    today = datetime.now().date()
-    for date_str, new_day in matches:
-        try:
-            holiday_date = datetime.strptime(date_str, "%B %d, %Y").date()
-            if holiday_date >= today:
-                return f"Holiday week starting {holiday_date.strftime('%B %d')}: Collection is on {new_day}."
-        except ValueError:
-            continue
-    return None
+    street_label = street_number_and_name(address)
+    USERS.append({"phone": phone, "street_address": address, "street_label": street_label})
+    save_users(USERS)
 
-# ==== Messaging ====
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    # Send WELCOME template (category may be Utility or Marketing; user has opted in)
+    try:
+        send_whatsapp_template(
+            to=phone,
+            template_sid=TWILIO_TEMPLATE_SID_WELCOME,
+            variables={}
+        )
+    except Exception as e:
+        print("welcome template send failed:", e)
 
-def send_whatsapp_message(to, message):
-    msg = client.messages.create(
-        from_=TWILIO_WHATSAPP_FROM,
-        body=message,
-        to=to
+    return {"status": "ok"}
+
+@app.route("/whatsapp_webhook", methods=["POST"])
+def whatsapp_webhook():
+    """Inbound WhatsApp messages (session replies)."""
+    form = dict(request.form)
+    print("Twilio incoming webhook:", form)
+    from_number = form.get("From")  # e.g., 'whatsapp:+1...'
+    body = (form.get("Body") or "").strip()
+    resp = MessagingResponse()
+
+    if not from_number:
+        resp.message("Missing sender.")
+        return Response(str(resp), mimetype="application/xml")
+
+    lower = body.lower()
+
+    if lower in {"stop", "stop all", "cancel", "unsubscribe"}:
+        # remove from USERS
+        removed = False
+        for i in range(len(USERS) - 1, -1, -1):
+            if USERS[i].get("phone") == from_number or USERS[i].get("phone_number") == from_number:
+                USERS.pop(i); removed = True
+        if removed:
+            save_users(USERS)
+            resp.message("You are unsubscribed from trash & recycling reminders.")
+        else:
+            resp.message("You are not currently subscribed.")
+        return Response(str(resp), mimetype="application/xml")
+
+    if "recycl" in lower:
+        tz = pytz.timezone("US/Eastern")
+        today = datetime.now(tz).date()
+        rtype = get_recycling_type_for_date(today)
+        resp.message(f"This week is {rtype} recycling.\nReply STOP to unsubscribe.")
+        return Response(str(resp), mimetype="application/xml")
+
+    if "trash" in lower or "pickup" in lower:
+        user = next((u for u in USERS if u.get("phone") == from_number or u.get("phone_number") == from_number), None)
+        if user:
+            tz = pytz.timezone("US/Eastern")
+            tomorrow = datetime.now(tz).date() + timedelta(days=1)
+            street_lbl = user.get("street_label") or street_number_and_name(user.get("street_address", ""))
+            rtype = get_recycling_type_for_date(tomorrow)
+            zone  = lookup_zone_by_address(user.get("street_address", ""))
+            note  = get_next_holiday_shift(zone, ref_date=tomorrow)
+            msg = f"Reminder: Tomorrow is trash day for {street_lbl}.\nRecycling: {rtype}."
+            if note:
+                msg += f"\n{note}"
+            resp.message(msg)
+        else:
+            resp.message(f"I don’t have you on file. Use the sign-up form: {FORM_URL}\nOr reply “JOIN 123 Main St, Town, ZIP”.")
+        return Response(str(resp), mimetype="application/xml")
+
+    # Help
+    resp.message(
+        "Hi! I can send trash & recycling timing reminders.\n"
+        "• Text your address to subscribe (or use the form).\n"
+        "• Ask: “What’s recycling this week?”\n"
+        "• Reply STOP to unsubscribe."
     )
-    print(f"📩 Twilio confirmation SID: {msg.sid}")
+    return Response(str(resp), mimetype="application/xml")
 
-# ==== Weekly Reminder Scheduler ====
+# ── Test routes (remove after you’re live) ────────────────────────────────────
+
+@app.route("/test_welcome")
+def test_welcome():
+    """Manually fire the WELCOME template to your own phone for sanity check."""
+    to = normalize_whatsapp_number(os.environ.get("TEST_PHONE", ""))  # set TEST_PHONE=+1NNNN…
+    if not to:
+        return "Set TEST_PHONE='+1NNNNNNNNNN' env var", 400
+    msg = send_whatsapp_template(to=to, template_sid=TWILIO_TEMPLATE_SID_WELCOME, variables={})
+    return f"OK SID={msg.sid}"
+
+@app.route("/run_reminders_now")
+def run_reminders_now():
+    """One-shot trigger of the reminder loop for immediate testing."""
+    send_weekly_reminders()
+    return "Triggered send_weekly_reminders()"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reminder engine (called by cron; not scheduled in-process here)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def send_weekly_reminders():
     tz = pytz.timezone("US/Eastern")
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
 
     for user in USERS:
-        zone = lookup_zone_by_address(user["street_address"])
-        if not zone:
+        phone = normalize_whatsapp_number(user.get("phone") or user.get("phone_number", ""))
+        if not phone:
             continue
 
-        recycling_type = get_recycling_type_for_date(tomorrow)
-        holiday_shift = get_next_holiday_shift(zone)
+        addr_full    = user.get("street_address", "")
+        street_label = user.get("street_label") or street_number_and_name(addr_full)
 
-        reminder = f"Reminder: Tomorrow is trash day for {user['street_address']} ({zone}).\nRecycling type: {recycling_type}."
-        if holiday_shift:
-            reminder += f"\nNote: {holiday_shift}"
+        zone          = lookup_zone_by_address(addr_full) if addr_full else None
+        holiday_note  = get_next_holiday_shift(zone, ref_date=tomorrow)
+        recycling     = get_recycling_type_for_date(tomorrow)
 
-        send_whatsapp_message(user["phone_number"], reminder)
+        # Choose BASIC vs HOLIDAY
+        tpl = TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY if (holiday_note and TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY) else TWILIO_TEMPLATE_SID_WEEKLY_BASIC
+        if not tpl:
+            print("⚠️ No reminder template SID configured; skip send.")
+            continue
 
-# ==== Flask App ====
-app = Flask(__name__)
+        # Map variables to your chosen template shape.
+        # If your BASIC/HOLIDAY are 2-var ({{1}}=street, {{2}}=recycling) + HOLIDAY adds {{3}}=note:
+        vars_map = {"1": street_label, "2": recycling}
+        if holiday_note:
+            vars_map["3"] = holiday_note
 
-@app.route("/", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
-    print(f"Received JSON payload: {data}")
-    phone = data.get("phone_number")
-    address = data.get("street_address")
-    consent = data.get("consent", "").lower()
+        # If your approved BASIC/HOLIDAY are 3-/4-var (address, date, recycling[, note]), switch to:
+        # pickup_date_str = tomorrow.strftime("%A, %b %-d")
+        # vars_map = {"1": street_label, "2": pickup_date_str, "3": recycling}
+        # if holiday_note: vars_map["4"] = holiday_note
 
-    if not phone or not address:
-        return {"status": "error", "message": "Missing phone or address"}, 400
+        try:
+            msg = send_whatsapp_template(to=phone, template_sid=tpl, variables=vars_map)
+            print(f"✅ Reminder sent to {phone} sid={msg.sid}")
+        except Exception as e:
+            print(f"❌ Reminder failed for {phone}: {e}")
 
-    if "agree" in consent:
-        USERS.append({"phone_number": phone, "street_address": address})
-        save_users(USERS)
-        send_whatsapp_message(phone, f"✅ You are subscribed for trash reminders for {address}.")
-        return {"status": "ok"}
-    else:
-        return {"status": "error", "message": "Consent not given"}, 400
-
-# Replace <FORM_URL> with your Google Form URL (or remove the link text)
-FORM_URL = "https://forms.gle/ziXa2nyFr9Mdtgbw8"
-
-@app.route("/whatsapp_webhook", methods=["POST"])
-def whatsapp_webhook():
-    # Debug: print incoming form values (you'll see this in Render logs)
-    print("Twilio incoming webhook:", dict(request.form))
-
-    from_number = request.form.get("From")  # e.g. "whatsapp:+13029812102"
-    body = (request.form.get("Body") or "").strip()
-    resp = MessagingResponse()
-
-    # Basic safety
-    if not from_number:
-        resp.message("No sender number detected.")
-        return Response(str(resp), mimetype="application/xml")
-
-    lower = body.lower()
-
-    # Unsubscribe: user texts STOP
-    if "stop" in lower and len(lower) <= 10:
-        removed = False
-        for u in USERS:
-            if u.get("phone_number") == from_number:
-                USERS.remove(u)
-                save_users(USERS)
-                removed = True
-                break
-        if removed:
-            resp.message("You have been unsubscribed from Trash reminders. To re-subscribe, use the Google Form or reply START.")
-        else:
-            resp.message("We couldn't find your subscription. To sign up, please fill the Google Form: " + FORM_URL)
-        return Response(str(resp), mimetype="application/xml")
-
-    # Quick info: what's recycling this week
-    if "recycl" in lower:
-        tz = pytz.timezone("US/Eastern")
-        today = datetime.now(tz).date()
-        recycling = get_recycling_type_for_date(today)
-        resp.message(
-            f"This week is *{recycling}* recycling.\n"
-            f"To receive nightly reminders the evening before your pickup, sign up here: {FORM_URL}"
-        )
-        return Response(str(resp), mimetype="application/xml")
-
-    # Quick info: trash/pickup day (uses stored user info)
-    if any(k in lower for k in ("trash", "pickup", "garbage")):
-        user = next((u for u in USERS if u.get("phone_number") == from_number), None)
-        if user:
-            tz = pytz.timezone("US/Eastern")
-            tomorrow = datetime.now(tz).date() + timedelta(days=1)
-            rec_type = get_recycling_type_for_date(tomorrow)
-            addr = user.get("street_address")
-            zone = lookup_zone_by_address(addr) if addr else None
-            holiday_note = get_next_holiday_shift(zone) if zone else None
-
-            msg = f"Tomorrow is trash day for {addr} ({zone}).\nRecycling: {rec_type}."
-            if holiday_note:
-                msg += f"\nNote: {holiday_note}"
-            resp.message(msg)
-        else:
-            resp.message(
-                "I don't have you on file. To subscribe, please use the Google Form: "
-                f"{FORM_URL}\nOr reply with: JOIN <your address> (if you'd like in-chat signup)."
-            )
-        return Response(str(resp), mimetype="application/xml")
-
-    # Default/help reply
-    resp.message(
-        "Hi — I can tell you whether it's Paper or Commingled recycling this week, "
-        "and send nightly reminders. Try:\n• \"What's recycling this week?\"\n• \"When's trash pickup?\"\n• \"STOP\" to unsubscribe."
-    )
-    return Response(str(resp), mimetype="application/xml")
-
-# --- TEMP TEST ROUTE: remove after testing ---
-@app.route("/test_welcome")
-def test_welcome():
-    from os import environ as env
-    msg = send_whatsapp_template(
-        to="whatsapp:+13029812102",
-        template_sid=env["TWILIO_TEMPLATE_SID_WELCOME"],  # must be the HX... for the WhatsApp-approved “welcome” template
-        variables={}
-    )
-    return f"OK, SID={msg.sid}"
-# --- END TEMP ROUTE ---
-
-# ==== Schedule job ====
-schedule.every().monday.at("19:00").do(send_weekly_reminders)
-schedule.every().tuesday.at("19:00").do(send_weekly_reminders)
-schedule.every().wednesday.at("19:00").do(send_weekly_reminders)
-schedule.every().thursday.at("19:00").do(send_weekly_reminders)
-schedule.every().friday.at("19:00").do(send_weekly_reminders)
-
-if __name__ == "__main__":
-    # Start scheduler loop
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+# Note: no if __name__ == '__main__' run-loop here; the Web service should not
+# run a scheduler. Your Render Cron should import this module and call
+# send_weekly_reminders() at 8:00 PM ET (via a small `cron.py`).
