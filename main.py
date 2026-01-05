@@ -330,7 +330,16 @@ def webhook():
         return {"status": "error", "message": "Invalid phone"}, 400
 
     street_label = street_number_and_name(address)
-    USERS.append({"phone": phone, "street_address": address, "street_label": street_label})
+    
+    # Upsert: replace existing row for this phone or append a new one
+    existing = next((u for u in USERS if u.get("phone") == phone or u.get("phone_number") == phone), None)
+    if existing:
+        existing["phone"] = phone
+        existing["street_address"] = address
+        existing["street_label"] = street_label
+    else:
+        USERS.append({"phone": phone, "street_address": address, "street_label": street_label})
+
     save_users(USERS)
 
     # Send WELCOME template (category may be Utility or Marketing; user has opted in)
@@ -432,11 +441,13 @@ def send_weekly_reminders():
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
 
+    seen = set()  # <- NEW
     for user in USERS:
         phone = normalize_whatsapp_number(user.get("phone") or user.get("phone_number", ""))
-        if not phone:
+        if not phone or phone in seen:
             continue
-
+        seen.add(phone)
+        
         addr_full    = user.get("street_address", "")
         street_label = user.get("street_label") or street_number_and_name(addr_full)
 
