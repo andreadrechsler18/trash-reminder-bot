@@ -315,22 +315,20 @@ USERS: list[dict] = load_users()
 # CSV loader and 'where to get subscribers' helper
 # ──────────────────────────────────────────────────────────────────────────────
 def load_users_from_sheet(csv_url: str) -> list[dict]:
-    """Download published CSV and return a list of {'phone','street_address','street_label'} with consent."""
     if not csv_url:
         return []
     resp = requests.get(csv_url, timeout=15)
     resp.raise_for_status()
-    text = resp.text
-    rdr = csv.DictReader(io.StringDecoder().decode(text) if isinstance(text, bytes) else io.StringIO(text))
-    users: list[dict] = []
+    rdr = csv.DictReader(io.StringIO(resp.text))
+    users = []
     for row in rdr:
         addr = (row.get(SHEET_COL_ADDR, "") or "").strip()
         phone = (row.get(SHEET_COL_PHONE, "") or "").strip()
         consent = (row.get(SHEET_COL_CONS, "") or "").strip().lower()
         if not addr or not phone:
             continue
-        if consent and all(tok not in consent for tok in CONSENT_OK):
-            # has a value but not accepted -> skip
+        # accept blank consent or any value containing an allowed token
+        if consent and not any(tok in consent for tok in CONSENT_OK):
             continue
         users.append({
             "phone": normalize_whatsapp_number(phone),
