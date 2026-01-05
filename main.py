@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 
 import pytz
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import csv, io  # add with your other imports
@@ -476,10 +476,9 @@ def test_welcome():
 
 @app.route("/run_reminders_now")
 def run_reminders_now():
-    """One-shot trigger of the reminder loop for immediate testing."""
-    send_weekly_reminders()
-    return "Triggered send_weekly_reminders()"
-
+    results = send_weekly_reminders()
+    return jsonify({"count": len(results), "results": results})
+    
 # ──────────────────────────────────────────────────────────────────────────────
 # Reminder engine (called by cron; not scheduled in-process here)
 # ──────────────────────────────────────────────────────────────────────────────
