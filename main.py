@@ -9,6 +9,7 @@ import requests
 from flask import Flask, request, Response
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
+import csv, io  # add with your other imports
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration & Environment
@@ -24,6 +25,12 @@ TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
 TWILIO_TEMPLATE_SID_WEEKLY_BASIC   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
 TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
 TWILIO_TEMPLATE_SID_WELCOME        = os.environ.get("TWILIO_TEMPLATE_SID_WELCOME", "")
+
+SHEET_CSV_URL   = os.getenv("SHEET_CSV_URL", "").strip()
+SHEET_COL_ADDR  = os.getenv("SHEET_COL_ADDRESS", "Street Address")
+SHEET_COL_PHONE = os.getenv("SHEET_COL_PHONE", "Phone Number")
+SHEET_COL_CONS  = os.getenv("SHEET_COL_CONSENT", "Consent to Receive Messages")
+CONSENT_OK = [s.strip().lower() for s in os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1").split(",")]
 
 # Lower Merion endpoints
 TOKEN_URL  = "https://www.lowermerion.org/Home/GetToken"
@@ -303,6 +310,47 @@ def save_users(users: list[dict]) -> None:
         json.dump(users, f, indent=2)
 
 USERS: list[dict] = load_users()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CSV loader and 'where to get subscribers' helper
+# ──────────────────────────────────────────────────────────────────────────────
+def load_users_from_sheet(csv_url: str) -> list[dict]:
+    """Download published CSV and return a list of {'phone','street_address','street_label'} with consent."""
+    if not csv_url:
+        return []
+    resp = requests.get(csv_url, timeout=15)
+    resp.raise_for_status()
+    text = resp.text
+    rdr = csv.DictReader(io.StringDecoder().decode(text) if isinstance(text, bytes) else io.StringIO(text))
+    users: list[dict] = []
+    for row in rdr:
+        addr = (row.get(SHEET_COL_ADDR, "") or "").strip()
+        phone = (row.get(SHEET_COL_PHONE, "") or "").strip()
+        consent = (row.get(SHEET_COL_CONS, "") or "").strip().lower()
+        if not addr or not phone:
+            continue
+        if consent and all(tok not in consent for tok in CONSENT_OK):
+            # has a value but not accepted -> skip
+            continue
+        users.append({
+            "phone": normalize_whatsapp_number(phone),
+            "street_address": addr,
+            "street_label": street_number_and_name(addr),
+        })
+    return users
+
+def current_subscribers() -> list[dict]:
+    """Return current subscribers from the Sheet if configured; else fall back to in-memory USERS."""
+    if SHEET_CSV_URL:
+        try:
+            subs = load_users_from_sheet(SHEET_CSV_URL)
+            if subs:
+                return subs
+        except Exception as e:
+            print(f"⚠️ Failed to load SHEET_CSV_URL: {e}")
+    # fallback: in-memory (from / webhook)
+    return USERS or []
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Flask app & routes
