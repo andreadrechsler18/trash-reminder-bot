@@ -358,11 +358,10 @@ def current_subscribers() -> list[dict]:
 
 app = Flask(__name__)
 
-@app.route("/", methods=["POST"])
-def webhook():
-    """Google Form → Webhook: expects JSON with street_address, phone_number, consent."""
-    data = request.get_json(force=True)
-    print("Received JSON payload:", data)
+@app.route("/run_reminders_now")
+def run_reminders_now():
+    results = send_weekly_reminders() or []  # never None
+    return jsonify({"count": len(results), "results": results})
 
     raw_phone = (data.get("phone_number") or data.get("phone") or "").strip()
     address   = (data.get("street_address") or data.get("address") or "").strip()
@@ -483,47 +482,72 @@ def run_reminders_now():
 # Reminder engine (called by cron; not scheduled in-process here)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def send_weekly_reminders():
-    tz = pytz.timezone("US/Eastern")
-    today = datetime.now(tz).date()
-    tomorrow = today + timedelta(days=1)
+def send_weekly_reminders() -> list[dict]:
+    """
+    Pull subscribers (sheet or memory), send one reminder per phone,
+    and return a list of outcome dicts:
+      {phone, template, sid, status, error}
+    """
+    results: list[dict] = []
 
-    seen = set()  # <- NEW
-    for user in USERS:
-        phone = normalize_whatsapp_number(user.get("phone") or user.get("phone_number", ""))
+    try:
+        subs = current_subscribers()
+    except Exception as e:
+        print(f"⚠️ current_subscribers error: {e}")
+        return results  # empty list, not None
+
+    print(f"Loaded {len(subs)} subscribers from {'sheet' if SHEET_CSV_URL else 'memory'}")
+
+    if not subs:
+        return results
+
+    tz = pytz.timezone("US/Eastern")
+    tomorrow = datetime.now(tz).date() + timedelta(days=1)
+    seen: set[str] = set()
+
+    for u in subs:
+        phone = normalize_whatsapp_number(u.get("phone") or u.get("phone_number", ""))
         if not phone or phone in seen:
             continue
         seen.add(phone)
-        
-        addr_full    = user.get("street_address", "")
-        street_label = user.get("street_label") or street_number_and_name(addr_full)
 
-        zone          = lookup_zone_by_address(addr_full) if addr_full else None
-        holiday_note  = get_next_holiday_shift(zone, ref_date=tomorrow)
+        addr = u.get("street_address", "") or ""
+        street_label = u.get("street_label") or street_number_and_name(addr)
+
+        zone          = lookup_zone_by_address(addr) if addr else None
+        holiday_note  = get_next_holiday_shift(zone, ref_date=tomorrow) if zone else None
         recycling     = get_recycling_type_for_date(tomorrow)
 
-        # Choose BASIC vs HOLIDAY
-        tpl = TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY if (holiday_note and TWILIO_TEMPLATE_SID_WEEKLY_HOLIDAY) else TWILIO_TEMPLATE_SID_WEEKLY_BASIC
-        if not tpl:
-            print("⚠️ No reminder template SID configured; skip send.")
+        # choose template (2-var BASIC; HOLIDAY adds {{3}})
+        template_sid = (TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY
+                        if (holiday_note and TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY)
+                        else TWILIO_TEMPLATE_SID_REMINDER_BASIC)
+
+        outcome = {"phone": phone, "template": template_sid, "sid": None,
+                   "status": "skipped", "error": None}
+
+        if not template_sid:
+            outcome["error"] = "No reminder template SID configured"
+            results.append(outcome)
             continue
 
-        # Map variables to your chosen template shape.
-        # If your BASIC/HOLIDAY are 2-var ({{1}}=street, {{2}}=recycling) + HOLIDAY adds {{3}}=note:
         vars_map = {"1": street_label, "2": recycling}
         if holiday_note:
-            vars_map["3"] = holiday_note
-
-        # If your approved BASIC/HOLIDAY are 3-/4-var (address, date, recycling[, note]), switch to:
-        # pickup_date_str = tomorrow.strftime("%A, %b %-d")
-        # vars_map = {"1": street_label, "2": pickup_date_str, "3": recycling}
-        # if holiday_note: vars_map["4"] = holiday_note
+            vars_map["3"] = holiday_note  # e.g., "Labor Day: collection on Wednesday."
 
         try:
-            msg = send_whatsapp_template(to=phone, template_sid=tpl, variables=vars_map)
-            print(f"✅ Reminder sent to {phone} sid={msg.sid}")
+            msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
+            outcome["sid"] = msg.sid
+            outcome["status"] = "queued"
+            print(f"Queued reminder sid={msg.sid} to {phone} vars={vars_map}")
         except Exception as e:
-            print(f"❌ Reminder failed for {phone}: {e}")
+            outcome["status"] = "failed"
+            outcome["error"] = str(e)
+            print(f"❌ Failed to send to {phone}: {e}")
+
+        results.append(outcome)
+
+    return results
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
 # run a scheduler. Your Render Cron should import this module and call
