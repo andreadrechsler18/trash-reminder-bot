@@ -649,6 +649,63 @@ def csv_debug():
         out["error"] = str(e)
     return out
 
+@app.route("/run_reminders_for_date")
+def run_reminders_for_date():
+    """
+    Test the reminder pipeline as if tomorrow were a specific date.
+    Call: /run_reminders_for_date?iso=2026-09-07  (YYYY-MM-DD)
+    Returns JSON with queued Twilio SIDs.
+    """
+    iso = request.args.get("iso", "").strip()
+    if not iso:
+        return jsonify({"error": "Provide ?iso=YYYY-MM-DD"}), 400
+    try:
+        fake = datetime.strptime(iso, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+    results = []
+    try:
+        subs = current_subscribers()
+        tz_fake = pytz.timezone("US/Eastern")
+        seen = set()
+        for u in subs:
+            phone = normalize_whatsapp_number(u.get("phone") or u.get("phone_number", ""))
+            if not phone or phone in seen:
+                continue
+            seen.add(phone)
+
+            addr = u.get("street_address", "") or ""
+            label = u.get("street_label") or street_number_and_name(addr)
+            zone = lookup_zone_by_address(addr) if addr else None
+            holiday_note = get_next_holiday_shift(zone, ref_date=fake) if zone else None
+
+            # choose HOLIDAY if note exists, otherwise BASIC
+            template_sid = (os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY")
+                            if holiday_note else os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC"))
+            if not template_sid:
+                results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
+                continue
+
+            # 2-var BASIC ({{1}}=street, {{2}}=recycling) + HOLIDAY adds {{3}}=holiday note
+            rtype = get_recycling_type_for_date(fake)
+            vars_map = {"1": label, "2": rtype}
+            if holiday_note:
+                vars_map["3"] = holiday_note
+
+            try:
+                msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
+                results.append({"phone": phone, "sid": getattr(msg, "sid", None),
+                                "template": template_sid, "vars": vars_map, "status": "queued"})
+            except Exception as e:
+                results.append({"phone": phone, "template": template_sid, "vars": vars_map,
+                                "status": "failed", "error": str(e)})
+    except Exception as e:
+        return jsonify({"error": str(e), "results": results}), 500
+
+    return jsonify({"count": len(results), "results": results})
+
+
 ######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
