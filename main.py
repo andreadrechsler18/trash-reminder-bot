@@ -1,4 +1,4 @@
-import os
+import os, io, csv, textwrap, requests
 import json
 import re
 from datetime import date, datetime, timedelta
@@ -10,6 +10,7 @@ from flask import Flask, request, Response, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import csv, io  # add with your other imports
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration & Environment
@@ -556,6 +557,29 @@ def subs_debug():
     except Exception as e:
         info["error"] = str(e)
     return info
+
+import os, io, csv, textwrap, requests
+
+@app.route("/csv_debug")
+def csv_debug():
+    url = os.getenv("SHEET_CSV_URL")
+    out = {"has_url": bool(url), "status": None, "headers": [], "first_rows": []}
+    if not url:
+        return out
+    try:
+        r = requests.get(url, timeout=10)
+        out["status"] = r.status_code
+        txt = r.text
+        # show first 5 lines to inspect headers
+        lines = txt.splitlines()
+        out["first_rows"] = lines[:5]
+        # parse headers as DictReader sees them
+        rdr = csv.reader(io.StringIO(txt))
+        out["headers"] = next(rdr, [])
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
 ######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
