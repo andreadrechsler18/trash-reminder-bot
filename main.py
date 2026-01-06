@@ -730,6 +730,19 @@ def env_check():
         "account_sid_prefix": (os.environ.get("TWILIO_ACCOUNT_SID") or "")[:10] + "…"
     })
 
+@app.route("/holiday_debug")
+def holiday_debug():
+    iso  = request.args.get("iso", "").strip()
+    zone = (request.args.get("zone", "") or "").title()  # e.g., Zone 3
+    if not iso or not zone:
+        return jsonify({"error": "Use ?iso=YYYY-MM-DD&zone=Zone%203"}), 400
+    try:
+        fake = datetime.strptime(iso, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Bad iso date"}), 400
+    note = get_next_holiday_shift(zone, ref_date=fake)
+    return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
+
 ######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
