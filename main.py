@@ -677,8 +677,16 @@ def run_reminders_for_date():
 
             addr = u.get("street_address", "") or ""
             label = u.get("street_label") or street_number_and_name(addr)
-            zone = lookup_zone_by_address(addr) if addr else None
+
+            # in run_reminders_for_date, after you compute label/addr
+            zone_param = request.args.get("zone", "").strip().title()  # e.g., "Zone 3"
+            zone = zone_param if zone_param in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+
+            # only call lookup if you didn't get a zone param
+            if not zone and addr:
+                zone = lookup_zone_by_address(addr)
             holiday_note = get_next_holiday_shift(zone, ref_date=fake) if zone else None
+
 
             # choose HOLIDAY if note exists, otherwise BASIC
             template_sid = (os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY")
