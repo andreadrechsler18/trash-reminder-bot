@@ -487,14 +487,18 @@ def whatsapp_webhook():
 from flask import jsonify
 
 @app.route("/run_reminders_now")
+@app.route("/run_reminders_now", methods=["GET"])
 def run_reminders_now():
+    """Manually trigger the reminder job and always return JSON (never 500 on None)."""
     try:
         results = send_weekly_reminders()
     except Exception as e:
+        # If the worker itself blew up, return a JSON error instead of a 500 stacktrace
         print("send_weekly_reminders raised:", e)
         return jsonify({"count": 0, "results": [], "error": str(e)}), 500
 
     if not isinstance(results, list):
+        # If the worker returned None or something unexpected, coerce to [] so len() is safe
         print(f"send_weekly_reminders returned {type(results)}; coercing to []")
         results = []
 
@@ -505,34 +509,99 @@ def run_reminders_now():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def send_weekly_reminders() -> list[dict]:
+    """
+    Build and send reminders for all known subscribers.
+    Returns a list of per-recipient result dicts; never returns None.
+    """
     results: list[dict] = []
 
-    # 1) load subs
+    # 1) Load subscribers from your sheet helper (or fall back to USERS)
     try:
-        subs = current_subscribers()   # or current_users_list(), or USERS
+        subs = current_subscribers()  # must return a list of dicts with at least phone/address
     except Exception as e:
         print("current_subscribers() error:", e)
-        return results  # ← return a list, not None
+        return results  # safe: empty list means nothing to send
 
-    # 2) early exit if none
     if not subs:
+        print("No subscribers found by current_subscribers()")
         return results
 
-    # 3) send loop, always append an outcome dict
+    tz = pytz.timezone("US/Eastern")
+    tomorrow = (datetime.now(tz).date() + timedelta(days=1))
+
+    # 2) Iterate and send
     for u in subs:
+        # Normalise fields defensively
+        phone_raw = (u.get("phone") or u.get("phone_number") or "").strip()
+        phone = normalize_whatsapp_number(phone_raw) if phone_raw else ""
+        addr_full = (u.get("street_address") or u.get("address") or "").strip()
+        street_label = (u.get("street_label") or street_number_and_name(addr_full)).strip()
+
+        if not phone:
+            results.append({"phone": phone_raw, "status": "skipped", "error": "invalid_or_missing_phone"})
+            continue
+        if not addr_full:
+            results.append({"phone": phone, "status": "skipped", "error": "missing_address"})
+            continue
+
+        # Lookup for this recipient
         try:
-            # ... normalize phone, build vars_map, choose template ...
-            msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
-            results.append({"phone": phone, "template": template_sid,
-                            "sid": msg.sid, "status": "queued", "error": None})
+            zone = lookup_zone_by_address(addr_full)
         except Exception as e:
-            print(f"send failed for {phone}: {e}")
-            results.append({"phone": phone, "template": template_sid,
-                            "sid": None, "status": "failed", "error": str(e)})
+            print(f"lookup_zone_by_address error for {addr_full}: {e}")
+            zone = None
 
-    # 4) ALWAYS return the list
+        try:
+            recycling_type = get_reliable_recycling_type_for_date(tomorrow)  # or get_recycling_type_for_date
+        except Exception as e:
+            print("get_recycling_type_for_date error:", e)
+            recycling_type = "Recycling"
+
+        try:
+            holiday_note = get_next_hotly_shift(zone, tomorrow) if zone else None  # or get_next_holiday_shift
+        except Exception as e:
+            print("get_next_holiday_shift error:", e)
+            holiday_note = None
+
+        # Choose template IDs from env
+        template_basic   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
+        template_holiday = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
+
+        template_sid = template_holiday if holiday_note and template_holiday else template_basic
+        if not template_sid:
+            results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
+            continue
+
+        # Map variables for your approved templates:
+        # BASIC:   {{1}} = street_label, {{2}} = recycling_type
+        # HOLIDAY: {{1}} = street_label, {{2}} = recycling_type, {{3}} = holiday_note
+        vars_map = {"1": street_label, "2": recycling_type}
+        if holiday_note:
+            vars_map["3"] = str(holiday_note)
+
+        # Send and record outcome
+        try:
+            msg = send_whatsapp_template(
+                to=phone,
+                template_sid=template_sid,
+                variables=vars_map
+            )
+            results.append({
+                "phone": phone,
+                "template": template_sid,
+                "status": "queued",
+                "sid": getattr(msg, "sid", None),
+            })
+        except Exception as e:
+            print(f"send_whatsapp_template error for {phone}: {e}")
+            results.append({
+                "phone": phone,
+                "template": template_sid,
+                "status": "error",
+                "error": str(e),
+            })
+
     return results
-
 ###########temporary, delete from final version:
 @app.route("/_debug_worker_type")
 def _debug_worker_type():
