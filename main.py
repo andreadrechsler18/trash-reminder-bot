@@ -537,6 +537,25 @@ def send_weekly_reminders() -> list[dict]:
 def _debug_worker_type():
     r = send_weekly_reminders()
     return {"type": str(type(r)), "is_list": isinstance(r, list), "len_safe": 0 if not isinstance(r, list) else len(r)}
+
+@app.route("/subs_debug")
+def subs_debug():
+    info = {"source": "memory", "env": {}, "count": 0, "sample": []}
+    try:
+        info["env"] = {
+            "SHEET_CSV_URL": bool(os.getenv("SHEET_CSV_URL")),
+            "SHEET_COL_ADDRESS": os.getenv("SHEET_COL_ADDRESS"),
+            "SHEET_COL_PHONE": os.getenv("SHEET_COL_PHONE"),
+            "SHEET_COL_CONSENT": os.getenv("SHEET_COL_CONSENT"),
+            "SHEET_CONSENT_OK": os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1"),
+        }
+        subs = current_subscribers()
+        info["source"] = "sheet" if os.getenv("SHEET_CSV_URL") else "memory"
+        info["count"] = len(subs)
+        info["sample"] = subs[:3]
+    except Exception as e:
+        info["error"] = str(e)
+    return info
 ######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
