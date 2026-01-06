@@ -483,6 +483,8 @@ def whatsapp_webhook():
     )
     return Response(str(resp), mimetype="application/xml")
 
+from flask import jsonify
+
 @app.route("/run_reminders_now")
 def run_reminders_now():
     try:
@@ -502,67 +504,40 @@ def run_reminders_now():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def send_weekly_reminders() -> list[dict]:
-    """
-    Returns a list of outcome dicts like:
-      {"phone": "...", "template": "HX…", "sid": "SM…", "status": "queued|failed|skipped", "error": "..."}
-    Never returns None.
-    """
     results: list[dict] = []
+
+    # 1) load subs
     try:
-        subs = current_users_list()  # or your current loader (current_subscribers)
+        subs = current_subscribers()   # or current_users_list(), or USERS
     except Exception as e:
-        print("current_users_list() error:", e)
-        return results  # empty list, not None
+        print("current_subscribers() error:", e)
+        return results  # ← return a list, not None
 
-    # … your existing logic …
-    # make sure every loop appends an outcome dict and you finish with:
-    return results
+    # 2) early exit if none
+    if not subs:
+        return results
 
-
-    tz = pytz.timezone("US/Eastern")
-    tomorrow = datetime.now(tz).date() + timedelta(days=1)
-    seen: set[str] = set()
-
+    # 3) send loop, always append an outcome dict
     for u in subs:
         try:
-            phone = normalize_whatsapp_number(u.get("phone") or u.get("phone_number",""))
-            if not phone or phone in seen:
-                continue
-            seen.add(phone)
-
-            addr = u.get("street_address","") or ""
-            label = u.get("street_label") or street_number_and_name(addr)
-            zone  = lookup_zone_by_address(addr) if addr else None
-            note  = get_next_holiday_shift(zone, ref_date=tomorrow) if zone else None
-            rec   = get_recycled_type_for_date(tomorrow) if 'get_recycled_type_for_date' in globals() else get_recycling_type_for_date(tomorrow)
-
-            template_sid = (TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY if (note and TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY)
-                            else TWILIO_TEMPLATE_SID_REMINDER_BASIC)
-
-            outcome = {"phone": phone, "template": template_sid, "sid": None, "status": "skipped", "error": None}
-
-            if not template_sid:
-                outcome["error"] = "No reminder template SID configured"
-                results.append(outcome)
-                continue
-
-            vars_map = {"1": label, "2": rec}
-            if note:
-                vars_map["3"] = note
-
+            # ... normalize phone, build vars_map, choose template ...
             msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
-            outcome.update({"sid": msg.sid, "status": "queued"})
-            print("Queued", outcome)
-            results.append(outcome)
-
+            results.append({"phone": phone, "template": template_sid,
+                            "sid": msg.sid, "status": "queued", "error": None})
         except Exception as e:
-            print(f"❌ send loop error for {u}: {e}")
-            outcome = {"phone": u.get("phone") or u.get("phone_number"),
-                       "template": template_sid if 'template_sid' in locals() else None,
-                       "sid": None, "status": "error", "error": str(e)}
-            results.append(outcome)
+            print(f"send failed for {phone}: {e}")
+            results.append({"phone": phone, "template": template_sid,
+                            "sid": None, "status": "failed", "error": str(e)})
 
+    # 4) ALWAYS return the list
     return results
+
+###########temporary, delete from final version:
+@app.route("/_debug_worker_type")
+def _debug_worker_type():
+    r = send_weekly_reminders()
+    return {"type": str(type(r)), "is_list": isinstance(r, list), "len_safe": 0 if not isinstance(r, list) else len(r)}
+######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
 # run a scheduler. Your Render Cron should import this module and call
