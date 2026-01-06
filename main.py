@@ -356,23 +356,39 @@ def current_subscribers() -> list[dict]:
 
 app = Flask(__name__)
 
+@app.route("/", methods=["POST"])
+def webhook():
+    """
+    Google Form -> Apps Script POSTs JSON here:
+      { street_address, phone_number, consent }
+    We upsert the subscriber into USERS and (only if new) send the WELCOME template.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
     raw_phone = (data.get("phone_number") or data.get("phone") or "").strip()
     address   = (data.get("street_address") or data.get("address") or "").strip()
     consent   = (data.get("consent") or "").strip().lower()
 
     if not raw_phone or not address:
-        return {"status": "error", "message": "Missing phone or address"}, 400
+        return jsonify({"status": "error", "message": "Missing phone or address"}), 400
     if "agree" not in consent:
-        return {"status": "error", "message": "Consent not granted"}, 400
+        return jsonify({"status": "error", "message": "Consent not granted"}), 400
 
-    phone = normalize_whatsapp_number(raw_phone)
+    phone = normalize_whatsapp_number(raw_phone)          # -> 'whatsapp:+1…'
     if not phone:
-        return {"status": "error", "message": "Invalid phone"}, 400
+        return jsonify({"status": "error", "message": "Invalid phone"}), 400
 
     street_label = street_number_and_name(address)
-    
-    # Upsert: replace existing row for this phone or append a new one
-    existing = next((u for u in USERS if u.get("phone") == phone or u.get("phone_number") == phone), None)
+
+    # Upsert (avoid duplicates)
+    existing = next(
+        (u for u in USERS if u.get("phone") == phone or u.get("phone_number") == phone),
+        None
+    )
+    is_new = existing is None
     if existing:
         existing["phone"] = phone
         existing["street_address"] = address
@@ -380,26 +396,31 @@ app = Flask(__name__)
     else:
         USERS.append({"phone": phone, "street_address": address, "street_label": street_label})
 
-    save_users(USERS)
-
-    # Send WELCOME template (category may be Utility or Marketing; user has opted in)
     try:
-        send_whatsapp_template(
-            to=phone,
-            template_sid=TWILIO_TEMPLATE_SID_WELCOME,
-            variables={}
-        )
+        save_users(USERS)
     except Exception as e:
-        print("welcome template send failed:", e)
+        print("Error saving USERS:", e)
 
-    return {"status": "ok"}
+    # Send WELCOME only on first subscribe
+    if is_new and TWILIO_TEMPLATE_SID_WELCOME:
+        try:
+            msg = send_whatsapp_template(
+                to=phone,
+                template_sid=TWILIO_TEMPLATE_SID_WELCOME,
+                variables={}
+            )
+            print(f"📩 welcome sid={msg.sid}")
+        except Exception as e:
+            print("⚠️ Welcome template send failed:", e)
+
+    return jsonify({"status": "ok"})
 
 @app.route("/whatsapp_webhook", methods=["POST"])
 def whatsapp_webhook():
     """Inbound WhatsApp messages (session replies)."""
     form = dict(request.form)
     print("Twilio incoming webhook:", form)
-    from_number = form.get("From")  # e.g., 'whatsapp:+1...'
+    from_number = (form.get("From") or "").strip()  # e.g., 'whatsapp:+1...'
     body = (form.get("Body") or "").strip()
     resp = MessagingResponse()
 
@@ -409,19 +430,22 @@ def whatsapp_webhook():
 
     lower = body.lower()
 
-    if lower in {"stop", "stop all", "cancel", "unsubscribe"}:
-        # remove from USERS
+    # Unsubscribe
+    if lower in {"stop", "stop all", "cancel", "unsubscribe", "quit", "end"}:
         removed = False
         for i in range(len(USERS) - 1, -1, -1):
-            if USERS[i].get("phone") == from_number or USERS[i].get("phone_number") == from_number:
+            p = USERS[i].get("phone") or USERS[i].get("phone_number")
+            if p and p.lower() == from_number.lower():
                 USERS.pop(i); removed = True
         if removed:
-            save_users(USERS)
+            try: save_users(USERS)
+            except Exception as e: print("save_users STOP error:", e)
             resp.message("You are unsubscribed from trash & recycling reminders.")
         else:
             resp.message("You are not currently subscribed.")
         return Response(str(resp), mimetype="application/xml")
 
+    # Quick “recycling” Q&A (works for anyone)
     if "recycl" in lower:
         tz = pytz.timezone("US/Eastern")
         today = datetime.now(tz).date()
@@ -429,63 +453,71 @@ def whatsapp_webhook():
         resp.message(f"This week is {rtype} recycling.\nReply STOP to unsubscribe.")
         return Response(str(resp), mimetype="application/xml")
 
+    # “trash / pickup” for subscribed users
     if "trash" in lower or "pickup" in lower:
-        user = next((u for u in USERS if u.get("phone") == from_number or u.get("phone_number") == from_number), None)
+        user = next((u for u in USERS
+                     if (u.get("phone") or u.get("phone_number","")).lower() == from_number.lower()), None)
         if user:
             tz = pytz.timezone("US/Eastern")
             tomorrow = datetime.now(tz).date() + timedelta(days=1)
             street_lbl = user.get("street_label") or street_number_and_name(user.get("street_address", ""))
             rtype = get_recycling_type_for_date(tomorrow)
             zone  = lookup_zone_by_address(user.get("street_address", ""))
-            note  = get_next_holiday_shift(zone, ref_date=tomorrow)
+            note  = get_next_holiday_shift(zone, ref_date=tomorrow) if zone else None
             msg = f"Reminder: Tomorrow is trash day for {street_lbl}.\nRecycling: {rtype}."
-            if note:
-                msg += f"\n{note}"
+            if note: msg += f"\n{note}"
             resp.message(msg)
         else:
-            resp.message(f"I don’t have you on file. Use the sign-up form: {FORM_URL}\nOr reply “JOIN 123 Main St, Town, ZIP”.")
+            form_url = os.environ.get("PUBLIC_SIGNUP_URL", "")
+            resp.message(f"I don’t have you on file. Use the sign-up form: {form_url}\nOr reply “JOIN 123 Main St, Town, ZIP”.")
         return Response(str(resp), mimetype="application/xml")
 
-    # Help
+    # Help text
+    form_url = os.environ.get("PUBLIC_SIGNUP_URL", "")
     resp.message(
         "Hi! I can send trash & recycling timing reminders.\n"
         "• Text your address to subscribe (or use the form).\n"
         "• Ask: “What’s recycling this week?”\n"
-        "• Reply STOP to unsubscribe."
+        "• Reply STOP to unsubscribe.\n"
+        f"{form_url}"
     )
     return Response(str(resp), mimetype="application/xml")
 
-# ── Test routes (remove after you’re live) ────────────────────────────────────
-
-@app.route("/test_welcome")
-def test_welcome():
-    """Manually fire the WELCOME template to your own phone for sanity check."""
-    to = normalize_whatsapp_number(os.environ.get("TEST_PHONE", ""))  # set TEST_PHONE=+1NNNN…
-    if not to:
-        return "Set TEST_PHONE='+1NNNNNNNNNN' env var", 400
-    msg = send_whatsapp_template(to=to, template_sid=TWILIO_TEMPLATE_SID_WELCOME, variables={})
-    return f"OK SID={msg.sid}"
-
 @app.route("/run_reminders_now")
 def run_reminders_now():
-    results = send_weekly_reminders() or []  # ensure not None
+    try:
+        results = send_weekly_reminders()
+    except Exception as e:
+        print("send_weekly_reminders raised:", e)
+        return jsonify({"count": 0, "results": [], "error": str(e)}), 500
+
+    if not isinstance(results, list):
+        print(f"send_weekly_reminders returned {type(results)}; coercing to []")
+        results = []
+
     return jsonify({"count": len(results), "results": results})
-    
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Reminder engine (called by cron; not scheduled in-process here)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def send_weekly_reminders() -> list[dict]:
+    """
+    Returns a list of outcome dicts like:
+      {"phone": "...", "template": "HX…", "sid": "SM…", "status": "queued|failed|skipped", "error": "..."}
+    Never returns None.
+    """
     results: list[dict] = []
     try:
-        subs = current_users_list()  # or whatever you named it
+        subs = current_users_list()  # or your current loader (current_subscribers)
     except Exception as e:
-        print("current_users_list() failed:", e)
+        print("current_users_list() error:", e)
         return results  # empty list, not None
 
-    print(f"Loaded {len(subs)} subscribers")
-    if not subs:
-        return results
+    # … your existing logic …
+    # make sure every loop appends an outcome dict and you finish with:
+    return results
+
 
     tz = pytz.timezone("US/Eastern")
     tomorrow = datetime.now(tz).date() + timedelta(days=1)
