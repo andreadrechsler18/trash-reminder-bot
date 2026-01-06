@@ -713,6 +713,22 @@ def run_reminders_for_date():
 
     return jsonify({"count": len(results), "results": results})
 
+@app.route("/env_check")
+def env_check():
+    return jsonify({
+        "sender": os.environ.get("TWILIO_WHATSAPP_FROM"),
+        "sid_basic_set": bool(os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC")),
+        "sid_holiday_set": bool(os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY")),
+        "welcome_set": bool(os.environ.get("TWILIO_TEMPLATE_SID_WELCOME")),
+        "sheet_csv_url_set": bool(os.environ.get("SHEET_CSV_URL")),
+        "sheet_cols": {
+            "address": os.environ.get("SHEET_COL_ADDRESS"),
+            "phone":   os.environ.get("SHEET_COL_PHONE"),
+            "consent": os.environ.get("SHEET_COL_CONSENT"),
+            "consent_ok": os.environ.get("SHEET_CONSENT_OK", "agree,yes,true,1"),
+        },
+        "account_sid_prefix": (os.environ.get("TWILIO_ACCOUNT_SID") or "")[:10] + "…"
+    })
 
 ######
 
