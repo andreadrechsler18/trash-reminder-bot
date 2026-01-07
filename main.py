@@ -743,6 +743,29 @@ def holiday_debug():
     note = get_next_holiday_shift(zone, ref_date=fake)
     return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
 
+from flask import request, jsonify
+from datetime import datetime
+
+@app.route("/holiday_scrape_debug")
+def holiday_scrape_debug():
+    """
+    Inspect what the holiday parser sees for a given zone/date.
+    Call: /holiday_scrape_debug?iso=2025-12-25&zone=Zone%203
+    """
+    iso  = (request.args.get("iso") or "").strip()
+    zone = (request.args.get("zone") or "").strip().title()
+    if not iso or zone not in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
+        return jsonify({"error":"Use ?iso=YYYY-MM-DD&zone=Zone%201..4"}), 400
+
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error":"Bad iso date"}), 400
+
+    note = get_next_holiday_shift(zone, ref_date=d)
+    return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
+
+
 ######
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
