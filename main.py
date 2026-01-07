@@ -765,8 +765,101 @@ def holiday_scrape_debug():
     note = get_next_holiday_shift(zone, ref_date=d)
     return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
 
+from flask import request, jsonify
+from datetime import datetime
 
-######
+@app.route("/holiday_trace")
+def holiday_trace():
+    """
+    Deep-dive trace of the holiday logic for a given address/date/zone.
+    Usage examples:
+      /holiday_trace?address=230%20Ardleigh%20Rd,%20Penn%20Valley,%20PA&iso=2025-12-25
+      /holiday_trace?iso=2025-12-25&zone=Zone%203
+    Returns JSON describing each step:
+      - token fetch & status
+      - zone source (param/cache/lookup) and value
+      - holiday page URL for that zone
+      - parsed holiday row for the ISO week
+      - final 'holiday_note' string (the {{3}} value)
+    """
+    iso  = (request.args.get("iso") or "").strip()
+    addr = (request.args.get("address") or "").strip()
+    zone_param = (request.args.get("zone") or "").strip().title()
+
+    out = {
+        "inputs": {"iso": iso, "address": addr, "zone_param": zone_param},
+        "token": {"status": None, "error": None},
+        "zone": {"value": None, "source": None, "error": None},
+        "holiday_page": {"url": None},
+        "parse": {"match_week": None, "holiday_name": None, "new_weekday": None, "error": None},
+        "holiday_note": None
+    }
+
+    # 1) Parse date
+    if not iso:
+        return jsonify({"error": "Provide ?iso=YYYY-MM-DD"}), 400
+    try:
+        ref_date = datetime.strptime(iso, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid iso format, use YYYY-MM-DD"}), 400
+
+    # 2) Resolve zone (param beats cache beats lookup)
+    zone = None
+    if zone_param in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"}:
+        zone = zone_param
+        out["zone"]["source"] = "param"
+    else:
+        # Try to find in USERS cache if an address matches
+        if addr:
+            cache = next((u for u in USERS
+                          if (u.get("street_address","").strip().lower() == addr.strip().lower())
+                          and u.get("zone")), None)
+            if cache and cache.get("zone") in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
+                zone = cache.get("zone")
+                out["zone"]["source"] = "cache"
+
+        # If still missing, try live lookup (may 403 on Render)
+        if not zone and addr:
+            try:
+                token = get_auth_token()
+                out["token"]["status"] = "ok" if token else "empty"
+                zone = lookup_zone_by_address(addr)
+                out["zone"]["source"] = "lookup"
+            except Exception as e:
+                out["token"]["status"] = "error"
+                out["token"]["error"] = str(e)
+                out["zone"]["error"] = "address lookup failed (token/site blocked)"
+
+    out["zone"]["value"] = zone
+
+    # Abort early if we still don't have a zone
+    if zone not in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
+        out["holiday_note"] = None
+        return jsonify(out)
+
+    # 3) Build zone page URL
+    page_url = ZONE_URLS.get(zone)
+    out["holiday_page"]["url"] = page_url
+
+    # 4) Ask the parser for this week
+    try:
+        note = get_next_holiday_shift(zone, ref_date=ref_date)
+        out["holiday_note"] = note
+        if note:
+            # Try to extract "Holiday Name" and "Weekday" for reporting
+            m = re.search(r"^(.*?):\s*collection on\s*(Monday|Tuesday|Wednesday|Thursday|Friday)\.?$", note, re.I)
+            if m:
+                out["parse"]["holiday_name"] = m.group(1)
+                out["parse"]["new_weekday"] = m.group(2).title()
+        else:
+            out["parse"]["error"] = "no holiday shift found for this ISO week"
+    except Exception as e:
+        out["parse"]["error"] = str(e)
+
+    return jsonify(out)
+
+
+#######################
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
 # run a scheduler. Your Render Cron should import this module and call
