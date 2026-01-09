@@ -10,6 +10,7 @@ from flask import Flask, request, Response, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import csv, io  # add with your other imports
+from functools import lru_cache
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -30,8 +31,22 @@ TWILIO_TEMPLATE_SID_WELCOME        = os.environ.get("TWILIO_TEMPLATE_SID_WELCOME
 SHEET_CSV_URL   = os.getenv("SHEET_CSV_URL", "").strip()
 SHEET_COL_ADDR  = os.getenv("SHEET_COL_ADDRESS", "Street Address")
 SHEET_COL_PHONE = os.getenv("SHEET_COL_PHONE", "Phone Number")
+SHEET_COL_ZONE  = os.getenv("SHEET_COL_ZONE", "Zone")  # optional column in your Sheet
 SHEET_COL_CONS  = os.getenv("SHEET_COL_CONSENT", "Consent to Receive Messages")
 CONSENT_OK = [s.strip().lower() for s in os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1").split(",")]
+
+WEEKDAY_RX = re.compile(r"\b(Monday|Tuesday|Wednesday|Thursday|Friday)\b", re.I)
+HOLIDAY_RULES_JSON     = os.getenv("HOLIDAY_RULES_JSON", "").strip()
+HOLIDAY_OVERRIDES_JSON = os.getenv("HOLIDAY_OVERRIDES_JSON", "").strip()
+try:
+    HOLIDAY_RULES = json.loads(HOLIDAY_RULES_JSON) if HOLIDAY_RULES_JSON else {}
+except Exception:
+    HOLIDAY_RULES = {}
+try:
+    HOLIDAY_OVERRIDES = json.loads(HOLIDAY_OVERRIDES_JSON) if HOLIDAY_OVERRIDES_JSON else {}
+except Exception:
+    HOLIDAY_OVERRIDES = {}
+
 
 # Lower Merion endpoints
 TOKEN_URL  = "https://www.lowermerion.org/Home/GetToken"
@@ -155,40 +170,45 @@ def lookup_zone_by_address(address: str) -> Optional[str]:
         print("lookup_zone_by_address error:", e)
     return None
 
-def get_next_holiday_shift(zone: Optional[str], ref_date: Optional[date] = None) -> Optional[str]:
-    """
-    Return a short note like 'Labor Day: collection on Wednesday.' for the ISO week containing ref_date.
-    Looks up the 'Holiday Collection – Zone X' page, reads the table (Date | Holiday | New Collection Day).
-    Falls back to regex if bs4 isn't available.
-    """
-    if not zone or zone not in ZONE_URLS:
+def _parse_date(txt: str, year: int) -> date | None:
+    """Accept 'Monday, December 25, 2025' or 'December 25, 2025'."""
+    txt = " ".join(txt.split())
+    for fmt in ("%A, %B %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(txt, fmt).date()
+        except ValueError:
+            pass
+    # remove leading weekday and try again
+    m = re.sub(r"^[A-Za-z]+,\s*", "", txt)
+    try:
+        return datetime.strptime(m, "%B %d, %Y").date()
+    except ValueError:
         return None
 
-    if ref_date is None:
-        ref_date = datetime.now(pytz.timezone("US/Eastern")).date()
+@lru_cache(maxsize=16)
+def _scrape_zone_index(zone: str, year: int) -> list[dict]:
+    """
+    Fetch the 'Holiday Collection – Zone X' page and build an index:
+    [{'date': date, 'name': 'Christmas Day', 'weekday': 'Friday'}, ...]
+    """
+    url = ZONE_URLS[zone]
+    html = requests.get(url, timeout=15).text
 
     try:
-        html = requests.get(ZONE_URLS[zone], timeout=15).text
-    except Exception as e:
-        print("holiday fetch error:", e)
-        return None
+        from bs4 import BeautifulSoup  # requires beautifulsoup4 in requirements
+    except Exception:
+        BeautifulSoup = None
 
-    week_mon = ref_date - timedelta(days=ref_date.weekday())
-    week_sun = week_mon + timedelta(days=6)
+    entries: list[dict] = []
 
-    # --- helper to parse date strings we might see on the page
-    def parse_dt(s: str) -> Optional[date]:
-        s = s.strip()
-        for fmt in ("%A, %B %d, %Y", "%B %d, %Y"):
-            try:
-                return datetime.strptime(s, fmt).date()
-            except ValueError:
-                pass
-        return None
+    def add_entry(dt: date | None, name: str | None, new_day: str | None):
+        if not dt or dt.year != year:
+            return
+        rec = {"date": dt, "name": (name or "Holiday").strip(), "weekday": (new_day or "").title()}
+        entries.append(rec)
 
-    # --- Preferred: parse the table with BeautifulSoup
-    try:
-        from bs4 import BeautifulSoup  # type: ignore
+    # ---- Preferred: parse an HTML table if present
+    if BeautifulSoup:
         soup = BeautifulSoup(html, "html.parser")
         table = soup.find("table")
         if table:
@@ -196,51 +216,71 @@ def get_next_holiday_shift(zone: Optional[str], ref_date: Optional[date] = None)
                 cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
                 if len(cells) < 2:
                     continue
-                # Try to locate a date in the first 1–2 cells
-                dt = parse_dt(cells[0]) or (parse_dt(cells[1]) if len(cells) > 1 else None)
-                if not dt:
-                    continue
-                if not (week_mon <= dt <= week_sun):
-                    continue
+                # find the first cell that parses as a date in 'year'
+                dt = None
+                name = None
+                for i, c in enumerate(cells[:2]):  # first two cells usually date + holiday name
+                    dtry = _parse_date(c, year)
+                    if dtry:
+                        dt = dtry
+                    else:
+                        # the non-date cell is likely the holiday name
+                        if (name is None) and re.search(r"(holiday|day)", c, re.I):
+                            name = c
+                # find a weekday anywhere in the row
+                mday = WEEKDAY_RX.search(" ".join(cells))
+                new_day = mday.group(1).title() if mday else None
+                add_entry(dt, name, new_day)
 
-                # Guess the holiday name & target weekday from remaining cells
-                holiday_name = ""
-                if len(cells) >= 2:
-                    # Prefer the cell that's not the date cell
-                    holiday_name = cells[1] if parse_dt(cells[0]) else cells[0]
-
-                mday = re.search(r"(Monday|Tuesday|Wednesday|Thursday|Friday)", " ".join(cells[1:]), re.I)
-                if mday:
-                    new_day = mday.group(1).title()
-                    name = holiday_name or "Holiday"
-                    return f"{name}: collection on {new_day}."
-                else:
-                    name = holiday_name or dt.strftime("%b %d")
-                    return f"{name}: collection may shift."
-    except Exception as e:
-        print("bs4 holiday parse error:", e)
-
-    # --- Fallback: regex over the raw HTML if a table parse wasn't possible
-    yr = ref_date.year
-    # capture 'Holiday Name' near the date, and a weekday somewhere after
-    pat = rf"(?P<name>[A-Za-z&\-\s]{{3,}})?[^<]{{0,120}}(?P<date>(?:Monday,\s*)?[A-Za-z]+\s+\d{{1,2}},\s*{yr}).{{0,220}}?(?P<weekday>Monday|Tuesday|Wednesday|Thursday|Friday)"
+    # ---- Fallback: regex across the raw HTML
+    # match 'Holiday Name ... <date in this year> ... weekday'
+    pat = rf"(?P<name>[A-Za-z][A-Za-z '&\-]{{2,}})?[^<]{{0,120}}(?P<date>(?:[A-Za-z]+,\s*)?[A-Za-z]+\s+\d{{1,2}},\s*{year}).{{0,220}}?(?P<wd>Monday|Tuesday|Wednesday|Thursday|Friday)"
     for m in re.finditer(pat, html, flags=re.I | re.S):
-        ds = m.group("date")
-        dt = parse_dt(ds) or parse_dt(re.sub(r"^Monday,\s*", "", ds))
-        if not dt:
-            continue
-        if not (week_mon <= dt <= week_sun):
-            continue
-        name = (m.group("name") or "").strip()
-        name = re.sub(r"\s+", " ", name)
-        # Clean obvious boilerplate fragments that aren't holiday names
-        if not name or len(name) < 3 or re.search(r"(date|holiday|collection|week|zone)", name, re.I):
-            name = "Holiday"
-        new_day = m.group("weekday").title()
-        return f"{name}: collection on {new_day}."
+        dt = _parse_date(m.group("date"), year)
+        nm = (m.group("name") or "").strip()
+        if not nm or re.search(r"(holiday|day)", nm, re.I) is None:
+            # try to pull name from nearby bold/strong tags if present
+            nm2 = re.search(r"<strong[^>]*>([^<]+)</strong>", html[max(0, m.start()-120):m.start()], re.I)
+            if nm2:
+                nm = nm2.group(1).strip()
+        add_entry(dt, nm or "Holiday", m.group("wd"))
 
-    return None
+    # de-duplicate by date
+    seen = set()
+    dedup: list[dict] = []
+    for r in sorted(entries, key=lambda x: x["date"]):
+        if r["date"] in seen:
+            continue
+        seen.add(r["date"])
+        dedup.append(r)
+    return dedup
 
+def get_next_holiday_shift(zone: str | None, ref_date: date | None = None) -> str | None:
+    """
+    Return 'Christmas Day: collection on Friday.' for the ISO week that contains ref_date.
+    Scrapes the public Zone page. No tokens. No address lookup.
+    """
+    if not zone or zone not in ZONE_URLS:
+        return None
+    if ref_date is None:
+        ref_date = datetime.now(pytz.timezone("US/Eastern")).date()
+
+    wk_mon = ref_date - timedelta(days=ref_date.weekday())
+    wk_sun = wk_mon + timedelta(days=6)
+
+    # Build or fetch the index for this zone/year
+    idx = _scrape_zone_index(zone, ref_date.year)
+    # Find any entry whose date falls in the same ISO week
+    for r in idx:
+        if wk_mon <= r["date"] <= wk_sun:
+            if r["weekday"]:
+                return f"{r['name']}: collection on {r['weekday']}."
+            else:
+                return f"{r['name']}: collection may shift."
+
+    # If the page didn't list this week, try to name the US holiday and give a soft note
+    nm = us_holiday_in_week(ref_date) if "us_holiday_in_week" in globals() else None
+    return f"{nm}: collection may shift." if nm else None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Recycling schedule (2025 fallback + 2026 generated by seed)
@@ -323,18 +363,25 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
     rdr = csv.DictReader(io.StringIO(resp.text))
     users = []
     for row in rdr:
-        addr = (row.get(SHEET_COL_ADDR, "") or "").strip()
-        phone = (row.get(SHEET_COL_PHONE, "") or "").strip()
-        consent = (row.get(SHEET_COL_CONS, "") or "").strip().lower()
+        addr    = (row.get(SHEET_COL_ADDR, "")  or "").strip()
+        phone   = (row.get(SHEET_COL_PHONE, "") or "").strip()
+        consent = (row.get(SHEET_COL_CONS, "")  or "").strip().lower()
+        zone_in = (row.get(SHEET_COL_ZONE, "")  or "").strip().title()  # "Zone 3" or ""
+
         if not addr or not phone:
             continue
         # accept blank consent or any value containing an allowed token
         if consent and not any(tok in consent for tok in CONSENT_OK):
             continue
+
+        # normalize "Zone X"
+        zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+
         users.append({
             "phone": normalize_whatsapp_number(phone),
             "street_address": addr,
             "street_label": street_number_and_name(addr),
+            **({"zone": zone} if zone else {})
         })
     return users
 
@@ -349,6 +396,53 @@ def current_subscribers() -> list[dict]:
             print(f"⚠️ Failed to load SHEET_CSV_URL: {e}")
     # fallback: in-memory (from / webhook)
     return USERS or []
+
+# ──────────────────────────────────────────────────────────────────────────────
+# holiday helpers 
+# ──────────────────────────────────────────────────────────────────────────────
+def holiday_note_from_overrides(zone: str | None, d: date) -> Optional[str]:
+    if not zone:
+        return None
+    return (HOLIDAY_OVERRIDES.get(d.isoformat(), {}) or {}).get(zone)
+
+def us_holiday_in_week(d: date) -> Optional[str]:
+    wk_mon = d - timedelta(days=d.weekday())
+    wk_sun = wk_mon + timedelta(days=6)
+    y = wk_mon.year
+    def in_week(m, dd):
+        t = date(y, m, dd)
+        return wk_mon <= t <= wk_sun
+    # fixed
+    if in_week(1,1):   return "New Year's Day"
+    if in_week(6,19):  return "Juneteenth"
+    if in_week(7,4):   return "Independence Day"
+    if in_week(11,11): return "Veterans Day"
+    if in_week(12,25): return "Christmas Day"
+    # floating
+    import calendar
+    def nth_weekday(month, weekday, n):
+        days = [dt for dt in calendar.Calendar().itermonthdates(y, month) if dt.month==month and dt.weekday()==weekday]
+        return days[n-1]
+    def last_weekday(month, weekday):
+        days = [dt for dt in calendar.Calendar().itermonthdates(y, month) if dt.month==month and dt.weekday()==weekday]
+        return days[-1]
+    if wk_mon <= nth_weekday(1,0,3)  <= wk_sun: return "Martin Luther King Jr. Day"
+    if wk_mon <= nth_weekday(2,0,3)  <= wk_sun: return "Presidents Day"
+    if wk_mon <= last_weekday(5,0)   <= wk_sun: return "Memorial Day"
+    if wk_mon <= nth_weekday(9,0,1)  <= wk_sun: return "Labor Day"
+    if wk_mon <= nth_weekday(10,0,2) <= wk_sun: return "Columbus/Indigenous Peoples Day"
+    # Thanksgiving: 4th Thu of Nov
+    if wk_mon <= nth_weekday(11,3,4) <= wk_sun: return "Thanksgiving Day"
+    return None
+
+def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
+    if not zone:
+        return None
+    name = us_holiday_in_week(d)
+    if not name:
+        return None
+    wd = (HOLIDAY_RULES.get(zone, {}) or {}).get(name)  # e.g., "Friday"
+    return f"{name}: collection on {wd}." if wd else f"{name}: collection may shift."
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -469,13 +563,32 @@ def whatsapp_webhook():
                      if (u.get("phone") or u.get("phone_number","")).lower() == from_number.lower()), None)
         if user:
             tz = pytz.timezone("US/Eastern")
-            tomorrow = datetime.now(tz).date() + timedelta(days=1)
+            tomorrow   = datetime.now(tz).date() + timedelta(days=1)
             street_lbl = user.get("street_label") or street_number_and_name(user.get("street_address", ""))
-            rtype = get_recycling_type_for_date(tomorrow)
-            zone  = lookup_zone_by_address(user.get("street_address", ""))
-            note  = get_next_holiday_shift(zone, ref_date=tomorrow) if zone else None
+            rtype      = get_recycling_type_for_date(tomorrow)
+            zone       = (user.get("zone") or "").title()  # ← prefer saved zone
+            # build holiday note: overrides -> scrape -> rules (no live zone lookup)
+            note = None
+            if zone in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
+                try:
+                    note = holiday_note_from_overrides(zone, tomorrow)
+                except NameError:
+                    note = None
+                if note is None:
+                    try:
+                        note = get_next_holiday_shift(zone, ref_date=tomorrow)
+                    except Exception as e:
+                        print(f"get_next_holiday_shift error for {zone}:", e)
+                        note = None
+                if note is None:
+                    try:
+                        note = holiday_note_from_rules(zone, tomorrow)
+                    except NameError:
+                        note = None
+
             msg = f"Reminder: Tomorrow is trash day for {street_lbl}.\nRecycling: {rtype}."
-            if note: msg += f"\n{note}"
+            if note:
+                msg += f"\n{note}"
             resp.message(msg)
         else:
             form_url = os.environ.get("PUBLIC_SIGNUP_URL", "")
