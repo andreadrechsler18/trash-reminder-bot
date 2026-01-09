@@ -361,48 +361,57 @@ app = Flask(__name__)
 def webhook():
     """
     Google Form -> Apps Script POSTs JSON here:
-      { street_address, phone_number, consent }
-    We upsert the subscriber into USERS and (only if new) send the WELCOME template.
+      { street_address, phone_number, consent, zone? }
+    Upsert subscriber; save zone if provided; send WELCOME only on first subscribe.
     """
     try:
         data = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
+    # 1) pull fields
     raw_phone = (data.get("phone_number") or data.get("phone") or "").strip()
     address   = (data.get("street_address") or data.get("address") or "").strip()
     consent   = (data.get("consent") or "").strip().lower()
+    zone_in   = (data.get("zone") or "").title()  # e.g., "Zone 3" (may be "")
 
     if not raw_phone or not address:
         return jsonify({"status": "error", "message": "Missing phone or address"}), 400
     if "agree" not in consent:
         return jsonify({"status": "error", "message": "Consent not granted"}), 400
 
-    phone = normalize_whatsapp_number(raw_phone)          # -> 'whatsapp:+1…'
+    # 2) normalize + derive
+    phone        = normalize_whatsapp_number(raw_phone)       # -> 'whatsapp:+1…'
     if not phone:
         return jsonify({"status": "error", "message": "Invalid phone"}), 400
-
     street_label = street_number_and_name(address)
 
-    # Upsert (avoid duplicates)
-    existing = next(
-        (u for u in USERS if u.get("phone") == phone or u.get("phone_number") == phone),
-        None
-    )
+    # 3) normalize/validate zone (save only if it’s one of the four)
+    zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+
+    # 4) upsert by phone (avoid duplicates)
+    existing = next((u for u in USERS
+                     if (u.get("phone") == phone or u.get("phone_number") == phone)), None)
     is_new = existing is None
+
     if existing:
         existing["phone"] = phone
         existing["street_address"] = address
         existing["street_label"] = street_label
+        if zone:                       # <— save zone if we got one
+            existing["zone"] = zone
     else:
-        USERS.append({"phone": phone, "street_address": address, "street_label": street_label})
+        rec = {"phone": phone, "street_address": address, "street_label": street_label}
+        if zone:
+            rec["zone"] = zone         # <— save zone on create
+        USERS.append(rec)
 
     try:
         save_users(USERS)
     except Exception as e:
         print("Error saving USERS:", e)
 
-    # Send WELCOME only on first subscribe
+    # 5) send WELCOME only once (first subscribe)
     if is_new and TWILIO_TEMPLATE_SID_WELCOME:
         try:
             msg = send_whatsapp_template(
@@ -415,7 +424,7 @@ def webhook():
             print("⚠️ Welcome template send failed:", e)
 
     return jsonify({"status": "ok"})
-
+    
 @app.route("/whatsapp_webhook", methods=["POST"])
 def whatsapp_webhook():
     """Inbound WhatsApp messages (session replies)."""
@@ -484,9 +493,6 @@ def whatsapp_webhook():
     )
     return Response(str(resp), mimetype="application/xml")
 
-from flask import jsonify
-
-@app.route("/run_reminders_now")
 @app.route("/run_reminders_now", methods=["GET"])
 def run_reminders_now():
     """Manually trigger the reminder job and always return JSON (never 500 on None)."""
@@ -510,98 +516,105 @@ def run_reminders_now():
 
 def send_weekly_reminders() -> list[dict]:
     """
-    Build and send reminders for all known subscribers.
-    Returns a list of per-recipient result dicts; never returns None.
+    Sends reminders to current subscribers.
+    Uses saved 'zone' on each subscriber; DOES NOT call township lookups here.
+    Holiday note order: per-date overrides -> scrape by zone -> local rules.
+    Returns a list of outcome dicts for debugging.
     """
     results: list[dict] = []
 
-    # 1) Load subscribers from your sheet helper (or fall back to USERS)
+    # Load subs (sheet or memory)
     try:
-        subs = current_subscribers()  # must return a list of dicts with at least phone/address
+        subs = current_subscribers()  # or USERS if you don't have this helper
     except Exception as e:
         print("current_subscribers() error:", e)
-        return results  # safe: empty list means nothing to send
+        return results
 
     if not subs:
-        print("No subscribers found by current_subscribers()")
+        print("No subscribers found.")
         return results
 
     tz = pytz.timezone("US/Eastern")
-    tomorrow = (datetime.now(tz).date() + timedelta(days=1))
+    tomorrow = datetime.now(tz).date() + timedelta(days=1)
 
-    # 2) Iterate and send
+    seen: set[str] = set()
     for u in subs:
-        # Normalise fields defensively
+        # ---- normalize basic fields
         phone_raw = (u.get("phone") or u.get("phone_number") or "").strip()
         phone = normalize_whatsapp_number(phone_raw) if phone_raw else ""
         addr_full = (u.get("street_address") or u.get("address") or "").strip()
         street_label = (u.get("street_label") or street_number_and_name(addr_full)).strip()
+        zone = (u.get("zone") or "").title()  # "Zone X" if stored
 
-        if not phone:
-            results.append({"phone": phone_raw, "status": "skipped", "error": "invalid_or_missing_phone"})
+        if not phone or phone in seen:
             continue
+        seen.add(phone)
         if not addr_full:
             results.append({"phone": phone, "status": "skipped", "error": "missing_address"})
             continue
 
-        # Lookup for this recipient
+        # ---- recycling type for the week
         try:
-            zone = lookup_zone_by_address(addr_full)
-        except Exception as e:
-            print(f"lookup_zone_by_address error for {addr_full}: {e}")
-            zone = None
-
-        try:
-            recycling_type = get_reliable_recycling_type_for_date(tomorrow)  # or get_recycling_type_for_date
+            recycling_type = get_recycling_type_for_date(tomorrow)
         except Exception as e:
             print("get_recycling_type_for_date error:", e)
             recycling_type = "Recycling"
 
-        try:
-            holiday_note = get_next_hotly_shift(zone, tomorrow) if zone else None  # or get_next_holiday_shift
-        except Exception as e:
-            print("get_next_holiday_shift error:", e)
-            holiday_note = None
+        # ---- build holiday note WITHOUT any live zone lookup
+        holiday_note = None
+        if zone in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"}:
+            # 1) explicit per-date override (optional, if you added HOLIDAY_OVERRIDES_JSON)
+            try:
+                holiday_note = holiday_note_from_overrides(zone, tomorrow)
+            except NameError:
+                holiday_note = None
 
-        # Choose template IDs from env
+            # 2) try public page scrape by zone (your bs4 parser)
+            if holiday_note is None:
+                try:
+                    holiday_note = get_next_holiday_shift(zone, ref_date=tomorrow)
+                except Exception as e:
+                    print(f"get_next_holiday_shift error for {zone}:", e)
+                    holiday_note = None
+
+            # 3) local rules fallback (HOLIDAY_RULES_JSON)
+            if holiday_note is None:
+                try:
+                    holiday_note = holiday_note_from_rules(zone, tomorrow)
+                except NameError:
+                    holiday_note = None
+
+        # ---- choose template (BASIC vs HOLIDAY) and map variables
         template_basic   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
         template_holiday = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
+        template_sid = template_holiday if (holiday_note and template_holiday) else template_basic
 
-        template_sid = template_holiday if holiday_note and template_holiday else template_basic
+        outcome = {"phone": phone, "template": template_sid, "sid": None,
+                   "status": "skipped", "error": None}
         if not template_sid:
-            results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
+            outcome["error"] = "missing_template_sid"
+            results.append(outcome)
             continue
 
-        # Map variables for your approved templates:
-        # BASIC:   {{1}} = street_label, {{2}} = recycling_type
-        # HOLIDAY: {{1}} = street_label, {{2}} = recycling_type, {{3}} = holiday_note
+        # 2-var BASIC: {{1}}=street_label, {{2}}=recycling_type
+        # HOLIDAY adds {{3}}=holiday_note
         vars_map = {"1": street_label, "2": recycling_type}
         if holiday_note:
-            vars_map["3"] = str(holiday_note)
+            vars_map["3"] = holiday_note
 
-        # Send and record outcome
+        # ---- send
         try:
-            msg = send_whatsapp_template(
-                to=phone,
-                template_sid=template_sid,
-                variables=vars_map
-            )
-            results.append({
-                "phone": phone,
-                "template": template_sid,
-                "status": "queued",
-                "sid": getattr(msg, "sid", None),
-            })
+            msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
+            outcome.update({"sid": getattr(msg, "sid", None), "status": "queued"})
+            print(f"Queued reminder sid={outcome['sid']} to {phone} vars={vars_map}")
         except Exception as e:
-            print(f"send_whatsapp_template error for {phone}: {e}")
-            results.append({
-                "phone": phone,
-                "template": template_sid,
-                "status": "error",
-                "error": str(e),
-            })
+            outcome.update({"status": "error", "error": str(e)})
+            print(f"❌ send failed for {phone}: {e}")
+
+        results.append(outcome)
 
     return results
+
 ###########temporary, delete from final version:
 @app.route("/_debug_worker_type")
 def _debug_worker_type():
@@ -653,10 +666,11 @@ def csv_debug():
 def run_reminders_for_date():
     """
     Test the reminder pipeline as if tomorrow were a specific date.
-    Call: /run_reminders_for_date?iso=2026-09-07  (YYYY-MM-DD)
+    Call: /run_reminders_for_date?iso=YYYY-MM-DD
+          (optional) &zone=Zone%203  ← for ad-hoc testing only
     Returns JSON with queued Twilio SIDs.
     """
-    iso = request.args.get("iso", "").strip()
+    iso = (request.args.get("iso") or "").strip()
     if not iso:
         return jsonify({"error": "Provide ?iso=YYYY-MM-DD"}), 400
     try:
@@ -664,38 +678,60 @@ def run_reminders_for_date():
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
-    results = []
+    # Optional per-request zone override (testing only)
+    zone_param = (request.args.get("zone") or "").title()
+    if zone_param not in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"}:
+        zone_param = None
+
+    results: list[dict] = []
     try:
-        subs = current_subscribers()
-        tz_fake = pytz.timezone("US/Eastern")
-        seen = set()
+        subs = current_subscribers()  # or USERS if you prefer
+        seen: set[str] = set()
+
         for u in subs:
             phone = normalize_whatsapp_number(u.get("phone") or u.get("phone_number", ""))
             if not phone or phone in seen:
                 continue
             seen.add(phone)
 
-            addr = u.get("street_address", "") or ""
-            label = u.get("street_label") or street_number_and_name(addr)
+            addr = (u.get("street_address") or "").strip()
+            label = (u.get("street_label") or street_number_and_name(addr)).strip()
 
-            # in run_reminders_for_date, after you compute label/addr
-            zone_param = request.args.get("zone", "").strip().title()  # e.g., "Zone 3"
-            zone = zone_param if zone_param in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+            # ---- use saved zone (or testing override); DO NOT live-lookup here
+            zone_saved = (u.get("zone") or "").title()
+            zone = zone_param or (zone_saved if zone_saved in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None)
 
-            # only call lookup if you didn't get a zone param
-            if not zone and addr:
-                zone = lookup_zone_by_address(addr)
-            holiday_note = get_next_holiday_shift(zone, ref_date=fake) if zone else None
+            # ---- build holiday note: overrides -> scrape -> local rules
+            holiday_note = None
+            if zone:
+                # 1) explicit per-date override (if you wired HOLIDAY_OVERRIDES_JSON)
+                try:
+                    holiday_note = holiday_note_from_overrides(zone, fake)
+                except NameError:
+                    holiday_note = None
+                # 2) scrape the zone’s holiday page (bs4 parser)
+                if holiday_note is None:
+                    try:
+                        holiday_note = get_next_holiday_shift(zone, ref_date=fake)
+                    except Exception as e:
+                        print(f"get_next_holiday_shift error for {zone}:", e)
+                        holiday_note = None
+                # 3) fallback rules (HOLIDAY_RULES_JSON)
+                if holiday_note is None:
+                    try:
+                        holiday_note = holiday_note_from_rules(zone, fake)
+                    except NameError:
+                        holiday_note = None
 
-
-            # choose HOLIDAY if note exists, otherwise BASIC
-            template_sid = (os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY")
-                            if holiday_note else os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC"))
+            # ---- choose template
+            tpl_basic   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
+            tpl_holiday = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
+            template_sid = tpl_holiday if (holiday_note and tpl_holiday) else tpl_basic
             if not template_sid:
                 results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
                 continue
 
-            # 2-var BASIC ({{1}}=street, {{2}}=recycling) + HOLIDAY adds {{3}}=holiday note
+            # ---- variables (2-var BASIC; HOLIDAY adds {{3}})
             rtype = get_recycling_type_for_date(fake)
             vars_map = {"1": label, "2": rtype}
             if holiday_note:
@@ -703,11 +739,23 @@ def run_reminders_for_date():
 
             try:
                 msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)
-                results.append({"phone": phone, "sid": getattr(msg, "sid", None),
-                                "template": template_sid, "vars": vars_map, "status": "queued"})
+                results.append({
+                    "phone": phone,
+                    "template": template_sid,
+                    "vars": vars_map,
+                    "sid": getattr(msg, "sid", None),
+                    "status": "queued"
+                })
             except Exception as e:
-                results.append({"phone": phone, "template": template_sid, "vars": vars_map,
-                                "status": "failed", "error": str(e)})
+                results.append({
+                    "phone": phone,
+                    "template": template_sid,
+                    "vars": vars_map,
+                    "sid": None,
+                    "status": "failed",
+                    "error": str(e)
+                })
+
     except Exception as e:
         return jsonify({"error": str(e), "results": results}), 500
 
