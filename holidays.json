@@ -1,0 +1,76 @@
+{
+  "2025": {
+    "holidays": [
+      {
+        "name": "New Year's Day",
+        "date": "2025-01-01",
+        "zones": {
+          "Zone 1": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 2": {"regular_day": "Tuesday", "shifted_day": "Wednesday"},
+          "Zone 3": {"regular_day": "Wednesday", "shifted_day": "Thursday"},
+          "Zone 4": {"regular_day": "Thursday", "shifted_day": "Friday"}
+        }
+      },
+      {
+        "name": "Memorial Day",
+        "date": "2025-05-26",
+        "zones": {
+          "Zone 1": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 2": {"regular_day": "Tuesday", "shifted_day": "Wednesday"},
+          "Zone 3": {"regular_day": "Wednesday", "shifted_day": "Thursday"},
+          "Zone 4": {"regular_day": "Thursday", "shifted_day": "Friday"}
+        }
+      },
+      {
+        "name": "Independence Day",
+        "date": "2025-07-04",
+        "zones": {
+          "Zone 1": {"regular_day": "Friday", "shifted_day": "Saturday"},
+          "Zone 2": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 3": {"regular_day": "Tuesday", "shifted_day": "Wednesday"},
+          "Zone 4": {"regular_day": "Wednesday", "shifted_day": "Thursday"}
+        }
+      },
+      {
+        "name": "Labor Day",
+        "date": "2025-09-01",
+        "zones": {
+          "Zone 1": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 2": {"regular_day": "Tuesday", "shifted_day": "Wednesday"},
+          "Zone 3": {"regular_day": "Wednesday", "shifted_day": "Thursday"},
+          "Zone 4": {"regular_day": "Thursday", "shifted_day": "Friday"}
+        }
+      },
+      {
+        "name": "Thanksgiving Day",
+        "date": "2025-11-27",
+        "zones": {
+          "Zone 1": {"regular_day": "Thursday", "shifted_day": "Friday"},
+          "Zone 2": {"regular_day": "Friday", "shifted_day": "Saturday"},
+          "Zone 3": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 4": {"regular_day": "Tuesday", "shifted_day": "Wednesday"}
+        }
+      },
+      {
+        "name": "Christmas Day",
+        "date": "2025-12-25",
+        "zones": {
+          "Zone 1": {"regular_day": "Thursday", "shifted_day": "Friday"},
+          "Zone 2": {"regular_day": "Friday", "shifted_day": "Saturday"},
+          "Zone 3": {"regular_day": "Monday", "shifted_day": "Tuesday"},
+          "Zone 4": {"regular_day": "Tuesday", "shifted_day": "Wednesday"}
+        }
+      }
+    ]
+  },
+  "_notes": [
+    "This file contains holiday collection schedule shifts for Lower Merion Township.",
+    "When a holiday falls on or affects a zone's regular collection day, pickup shifts to the day listed.",
+    "Update this file annually by checking: https://www.lowermerion.org/our-township/departments-divisions/public-works/highway-sanitation-public-works",
+    "Regular collection days by zone:",
+    "  Zone 1: Monday, Friday",
+    "  Zone 2: Tuesday, Friday",
+    "  Zone 3: Wednesday, Thursday",
+    "  Zone 4: Thursday, Friday"
+  ]
+}
