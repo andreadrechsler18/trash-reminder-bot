@@ -253,6 +253,29 @@ def _scrape_zone_index(zone: str, year: int) -> list[dict]:
     # ---- Preferred: parse an HTML table if present
     if BeautifulSoup:
         soup = BeautifulSoup(html, "html.parser")
+
+        # Look for text containing both holiday date and shifted day
+        # Common patterns: "Christmas Day - December 25 - will be collected on Friday"
+        # "Trash collection will move to Friday for the week of December 25"
+        text_content = soup.get_text(" ", strip=True)
+
+        # Try to extract from full text first
+        # Pattern: look for dates followed by "collected on WEEKDAY" or "move to WEEKDAY"
+        shift_pattern = rf"([A-Za-z\s']+(?:Day|Holiday)[^.]*?(?:[A-Za-z]+\s+\d{{1,2}},?\s*{year})[^.]*?(?:collected?\s+on|move[sd]?\s+to|shifted?\s+to|on)\s+(Monday|Tuesday|Wednesday|Thursday|Friday))"
+        for match in re.finditer(shift_pattern, text_content, re.I):
+            full_text = match.group(0)
+            # Extract date
+            date_match = re.search(rf"([A-Za-z]+\s+\d{{1,2}},?\s*{year})", full_text)
+            if date_match:
+                dt = _parse_date(date_match.group(1), year)
+                # Extract holiday name (text before the date)
+                name_match = re.search(r"([A-Za-z\s']+(?:Day|Holiday))", full_text[:date_match.start()])
+                name = name_match.group(1).strip() if name_match else "Holiday"
+                # Extract new weekday
+                new_day = match.group(2).title()
+                add_entry(dt, name, new_day)
+
+        # Also try table parsing as fallback
         table = soup.find("table")
         if table:
             for tr in table.find_all("tr"):
@@ -270,13 +293,24 @@ def _scrape_zone_index(zone: str, year: int) -> list[dict]:
                         # the non-date cell is likely the holiday name
                         if (name is None) and re.search(r"(holiday|day)", c, re.I):
                             name = c
-                # find a weekday anywhere in the row
-                mday = WEEKDAY_RX.search(" ".join(cells))
+                # find a weekday anywhere in the row - look for "collected on X" or just "X"
+                row_text = " ".join(cells)
+                mday = WEEKDAY_RX.search(row_text)
                 new_day = mday.group(1).title() if mday else None
                 add_entry(dt, name, new_day)
 
     # ---- Fallback: regex across the raw HTML
-    # match 'Holiday Name ... <date in this year> ... weekday'
+    # Pattern 1: Look for "collected on WEEKDAY" or "moved to WEEKDAY" near dates
+    shift_pat = rf"(?P<date>(?:[A-Za-z]+,\s*)?[A-Za-z]+\s+\d{{1,2}},?\s*{year})[^.{{0,300}}?(?:collected?\s+on|move[sd]?\s+to|shifted?\s+to|on)\s+(?P<wd>Monday|Tuesday|Wednesday|Thursday|Friday)"
+    for m in re.finditer(shift_pat, html, flags=re.I):
+        dt = _parse_date(m.group("date"), year)
+        # Try to find holiday name before the date
+        text_before = html[max(0, m.start()-150):m.start()]
+        name_match = re.search(r"(?:^|>)([A-Za-z\s']+(?:Day|Holiday))", text_before, re.I)
+        nm = name_match.group(1).strip() if name_match else "Holiday"
+        add_entry(dt, nm, m.group("wd"))
+
+    # Pattern 2: Original fallback - match 'Holiday Name ... <date in this year> ... weekday'
     pat = rf"(?P<name>[A-Za-z][A-Za-z '&\-]{{2,}})?[^<]{{0,120}}(?P<date>(?:[A-Za-z]+,\s*)?[A-Za-z]+\s+\d{{1,2}},\s*{year}).{{0,220}}?(?P<wd>Monday|Tuesday|Wednesday|Thursday|Friday)"
     for m in re.finditer(pat, html, flags=re.I | re.S):
         dt = _parse_date(m.group("date"), year)
