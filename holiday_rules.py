@@ -1,9 +1,12 @@
 """
 Holiday collection shift rules for Lower Merion Township
 Based on the chart from: https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection
+
+Automatically calculates federal holiday dates for any year.
 """
 
-from datetime import date
+from datetime import date, timedelta
+from calendar import monthcalendar, MONDAY, THURSDAY
 
 # Holiday shift rules based on the township chart
 HOLIDAY_SHIFT_RULES = {
@@ -37,24 +40,57 @@ HOLIDAY_SHIFT_RULES = {
     },
 }
 
-# Official holidays that affect collection (add more as needed)
-OFFICIAL_HOLIDAYS_2025 = [
-    {"name": "New Year's Day", "date": date(2025, 1, 1)},  # Wednesday
-    {"name": "Memorial Day", "date": date(2025, 5, 26)},  # Monday
-    {"name": "Independence Day", "date": date(2025, 7, 4)},  # Friday
-    {"name": "Labor Day", "date": date(2025, 9, 1)},  # Monday
-    {"name": "Thanksgiving Day", "date": date(2025, 11, 27)},  # Thursday
-    {"name": "Christmas Day", "date": date(2025, 12, 25)},  # Thursday
-]
+# Helper functions to calculate federal holiday dates
+def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    """
+    Find the nth occurrence of a weekday in a given month.
+    weekday: 0=Monday, 1=Tuesday, ..., 6=Sunday
+    n: 1=first, 2=second, 3=third, 4=fourth, -1=last
+    """
+    cal = monthcalendar(year, month)
 
-OFFICIAL_HOLIDAYS_2026 = [
-    {"name": "New Year's Day", "date": date(2026, 1, 1)},  # Thursday
-    {"name": "Memorial Day", "date": date(2026, 5, 25)},  # Monday
-    {"name": "Independence Day", "date": date(2026, 7, 4)},  # Saturday (observed Friday 7/3?)
-    {"name": "Labor Day", "date": date(2026, 9, 7)},  # Monday
-    {"name": "Thanksgiving Day", "date": date(2026, 11, 26)},  # Thursday
-    {"name": "Christmas Day", "date": date(2026, 12, 25)},  # Friday
-]
+    if n == -1:  # Last occurrence
+        # Go through weeks in reverse
+        for week in reversed(cal):
+            if week[weekday] != 0:
+                return date(year, month, week[weekday])
+    else:  # nth occurrence
+        count = 0
+        for week in cal:
+            if week[weekday] != 0:
+                count += 1
+                if count == n:
+                    return date(year, month, week[weekday])
+
+    raise ValueError(f"Could not find {n}th {weekday} in {year}-{month}")
+
+
+def calculate_federal_holidays(year: int) -> list:
+    """
+    Calculate the dates of federal holidays observed by Lower Merion Township.
+
+    Holidays observed by the Refuse Division:
+    - New Year's Day (January 1)
+    - Birthday of Martin Luther King, Jr (3rd Monday in January)
+    - Memorial Day (Last Monday in May)
+    - Juneteenth (June 19)
+    - Independence Day (July 4)
+    - Labor Day (1st Monday in September)
+    - Thanksgiving Day (4th Thursday in November)
+    - Christmas Day (December 25)
+    """
+    holidays = [
+        {"name": "New Year's Day", "date": date(year, 1, 1)},
+        {"name": "Martin Luther King Jr. Day", "date": nth_weekday_of_month(year, 1, MONDAY, 3)},
+        {"name": "Memorial Day", "date": nth_weekday_of_month(year, 5, MONDAY, -1)},
+        {"name": "Juneteenth", "date": date(year, 6, 19)},
+        {"name": "Independence Day", "date": date(year, 7, 4)},
+        {"name": "Labor Day", "date": nth_weekday_of_month(year, 9, MONDAY, 1)},
+        {"name": "Thanksgiving Day", "date": nth_weekday_of_month(year, 11, THURSDAY, 4)},
+        {"name": "Christmas Day", "date": date(year, 12, 25)},
+    ]
+
+    return holidays
 
 
 def get_shifted_collection_day(holiday_date: date, zone: str) -> str:
@@ -84,11 +120,8 @@ def get_shifted_collection_day(holiday_date: date, zone: str) -> str:
 
 
 def get_all_holidays_for_year(year: int) -> list:
-    """Get all official holidays for a given year."""
-    if year == 2025:
-        return OFFICIAL_HOLIDAYS_2025
-    elif year == 2026:
-        return OFFICIAL_HOLIDAYS_2026
-    else:
-        # Return empty list for years we don't have data for
-        return []
+    """
+    Get all official holidays for a given year.
+    Automatically calculates federal holiday dates.
+    """
+    return calculate_federal_holidays(year)
