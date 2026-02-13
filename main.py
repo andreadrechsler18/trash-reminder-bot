@@ -131,84 +131,73 @@ def monday_of(d: date) -> date:
 # Lower Merion lookups
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Load address lookup data from CSV (generated from township Excel file)
+_ADDRESS_LOOKUP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
+
+def _load_address_lookup() -> Dict[str, Dict[str, str]]:
+    """Load address lookup data from CSV file into memory."""
+    global _ADDRESS_LOOKUP_CACHE
+    if _ADDRESS_LOOKUP_CACHE is not None:
+        return _ADDRESS_LOOKUP_CACHE
+
+    lookup = {}
+    csv_path = os.path.join(os.path.dirname(__file__), "address_lookup.csv")
+
+    if not os.path.exists(csv_path):
+        print(f"Warning: {csv_path} not found. Address lookup will not work.")
+        _ADDRESS_LOOKUP_CACHE = {}
+        return _ADDRESS_LOOKUP_CACHE
+
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                addr = row['address'].strip().upper()
+                lookup[addr] = {
+                    'zone': row['zone'],
+                    'collection_day': row['collection_day']
+                }
+        print(f"Loaded {len(lookup)} addresses from lookup file")
+    except Exception as e:
+        print(f"Error loading address lookup: {e}")
+        lookup = {}
+
+    _ADDRESS_LOOKUP_CACHE = lookup
+    return _ADDRESS_LOOKUP_CACHE
+
 def lookup_zone_by_address(address: str) -> Optional[Dict[str, str]]:
     """
-    Return {'zone': 'Zone 1', 'collection_day': 'Monday'} for a given address via LM component API.
+    Return {'zone': 'Zone 1', 'collection_day': 'Monday'} for a given address.
+    Uses local address_lookup.csv file generated from township data.
     Returns None if lookup fails.
     """
     if not address:
         return None
-    try:
-        token = get_auth_token()
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json;charset=UTF-8",
-            "Origin": "https://www.lowermerion.org",
-        }
-        payload = {
-            "pageSize": 20,
-            "pageNumber": 1,
-            "sortOptions": [],
-            "searchText": address,
-            "searchFields": ["Address"],
-            "searchOperator": "OR",
-            "searchSeparator": ",",
-            "filterOptions": [],
-            "Data": {"componentGuid": COMPONENT_GUID, "listUniqueName": LIST_UNIQUE_NAME},
-        }
-        resp = requests.post(SEARCH_URL, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("items") or data.get("Items") or data.get("Data") or []
-        if isinstance(rows, dict):
-            rows = rows.get("Items", [])
 
-        zone = None
-        collection_day = None
+    # Load lookup data
+    lookup = _load_address_lookup()
+    if not lookup:
+        return None
 
-        for row in rows:
-            # Extract zone
-            if not zone:
-                for k in ("Refuse & Recycling Holiday Zone", "Holiday Zone", "Zone", "RefuseZone"):
-                    v = row.get(k)
-                    if isinstance(v, str) and "zone" in v.lower():
-                        zone = v.strip().title()
-                        break
-                # Otherwise scan any string field for zone
-                if not zone:
-                    for v in row.values():
-                        if isinstance(v, str) and "zone" in v.lower():
-                            zone = v.strip().title()
-                            break
+    # Normalize address for lookup
+    addr_normalized = street_number_and_name(address).strip().upper()
 
-            # Extract collection day
-            if not collection_day:
-                for k in ("Refuse Collection Day", "Collection Day", "Pickup Day", "Day"):
-                    v = row.get(k)
-                    if isinstance(v, str) and any(day in v for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]):
-                        # Extract the weekday from the value
-                        match = WEEKDAY_RX.search(v)
-                        if match:
-                            collection_day = match.group(1).title()
-                            break
-                # Scan all fields for a weekday
-                if not collection_day:
-                    for v in row.values():
-                        if isinstance(v, str):
-                            match = WEEKDAY_RX.search(v)
-                            if match:
-                                collection_day = match.group(1).title()
-                                break
+    # Try exact match first
+    if addr_normalized in lookup:
+        return lookup[addr_normalized]
 
-            if zone and collection_day:
-                return {"zone": zone, "collection_day": collection_day}
+    # Try fuzzy match - look for addresses that contain the street number + name
+    addr_parts = addr_normalized.split()
+    if len(addr_parts) >= 2:
+        street_num = addr_parts[0]
+        for lookup_addr, data in lookup.items():
+            if lookup_addr.startswith(street_num + " "):
+                # Check if street name matches (at least first word)
+                lookup_parts = lookup_addr.split()
+                if len(lookup_parts) >= 2 and len(addr_parts) >= 2:
+                    if lookup_parts[1].startswith(addr_parts[1][:3]):  # First 3 chars of street name
+                        return data
 
-        # Return partial data if we found something
-        if zone:
-            return {"zone": zone, "collection_day": None}
-
-    except Exception as e:
-        print("lookup_zone_by_address error:", e)
     return None
 
 def _parse_date(txt: str, year: int) -> date | None:
