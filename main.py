@@ -1053,6 +1053,40 @@ def holiday_scrape_debug():
         "entry_count": len(entries_serialized)
     })
 
+@app.route("/raw_html_debug")
+def raw_html_debug():
+    """
+    Show the raw HTML content from the zone holiday page for debugging.
+    Call: /raw_html_debug?zone=Zone%203
+    """
+    zone = (request.args.get("zone") or "").strip().title()
+    if zone not in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
+        return jsonify({"error":"Use ?zone=Zone%201..4"}), 400
+
+    url = ZONE_URLS[zone]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        html = response.text
+
+        # Return as plain text with proper content type
+        from flask import Response
+        return Response(html, mimetype='text/html')
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/holiday_trace")
 def holiday_trace():
     """
