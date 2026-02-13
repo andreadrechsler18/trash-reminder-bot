@@ -1,16 +1,18 @@
-import os, io, csv, textwrap, requests
+import os
+import io
+import csv
+import textwrap
 import json
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any
+from functools import lru_cache
 
 import pytz
 import requests
 from flask import Flask, request, Response, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
-import csv, io  # add with your other imports
-from functools import lru_cache
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -32,6 +34,7 @@ SHEET_CSV_URL   = os.getenv("SHEET_CSV_URL", "").strip()
 SHEET_COL_ADDR  = os.getenv("SHEET_COL_ADDRESS", "Street Address")
 SHEET_COL_PHONE = os.getenv("SHEET_COL_PHONE", "Phone Number")
 SHEET_COL_ZONE  = os.getenv("SHEET_COL_ZONE", "Zone")  # optional column in your Sheet
+SHEET_COL_DAY   = os.getenv("SHEET_COL_DAY", "Collection Day")  # optional column
 SHEET_COL_CONS  = os.getenv("SHEET_COL_CONSENT", "Consent to Receive Messages")
 CONSENT_OK = [s.strip().lower() for s in os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1").split(",")]
 
@@ -128,8 +131,11 @@ def monday_of(d: date) -> date:
 # Lower Merion lookups
 # ──────────────────────────────────────────────────────────────────────────────
 
-def lookup_zone_by_address(address: str) -> Optional[str]:
-    """Return 'Zone 1'..'Zone 4' for a given street address via LM component API."""
+def lookup_zone_by_address(address: str) -> Optional[Dict[str, str]]:
+    """
+    Return {'zone': 'Zone 1', 'collection_day': 'Monday'} for a given address via LM component API.
+    Returns None if lookup fails.
+    """
     if not address:
         return None
     try:
@@ -150,22 +156,57 @@ def lookup_zone_by_address(address: str) -> Optional[str]:
             "filterOptions": [],
             "Data": {"componentGuid": COMPONENT_GUID, "listUniqueName": LIST_UNIQUE_NAME},
         }
-        resp = requests.post(SEARCH_URL, headers=..., json=payload, timeout=15)
+        resp = requests.post(SEARCH_URL, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         rows = data.get("items") or data.get("Items") or data.get("Data") or []
         if isinstance(rows, dict):
             rows = rows.get("Items", [])
+
+        zone = None
+        collection_day = None
+
         for row in rows:
-            # Try direct field names first
-            for k in ("Refuse & Recycling Holiday Zone", "Holiday Zone", "Zone", "RefuseZone"):
-                v = row.get(k)
-                if isinstance(v, str) and "zone" in v.lower():
-                    return v.strip().title()
-            # Otherwise scan any string field
-            for v in row.values():
-                if isinstance(v, str) and "zone" in v.lower():
-                    return v.strip().title()
+            # Extract zone
+            if not zone:
+                for k in ("Refuse & Recycling Holiday Zone", "Holiday Zone", "Zone", "RefuseZone"):
+                    v = row.get(k)
+                    if isinstance(v, str) and "zone" in v.lower():
+                        zone = v.strip().title()
+                        break
+                # Otherwise scan any string field for zone
+                if not zone:
+                    for v in row.values():
+                        if isinstance(v, str) and "zone" in v.lower():
+                            zone = v.strip().title()
+                            break
+
+            # Extract collection day
+            if not collection_day:
+                for k in ("Refuse Collection Day", "Collection Day", "Pickup Day", "Day"):
+                    v = row.get(k)
+                    if isinstance(v, str) and any(day in v for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]):
+                        # Extract the weekday from the value
+                        match = WEEKDAY_RX.search(v)
+                        if match:
+                            collection_day = match.group(1).title()
+                            break
+                # Scan all fields for a weekday
+                if not collection_day:
+                    for v in row.values():
+                        if isinstance(v, str):
+                            match = WEEKDAY_RX.search(v)
+                            if match:
+                                collection_day = match.group(1).title()
+                                break
+
+            if zone and collection_day:
+                return {"zone": zone, "collection_day": collection_day}
+
+        # Return partial data if we found something
+        if zone:
+            return {"zone": zone, "collection_day": None}
+
     except Exception as e:
         print("lookup_zone_by_address error:", e)
     return None
@@ -192,7 +233,20 @@ def _scrape_zone_index(zone: str, year: int) -> list[dict]:
     [{'date': date, 'name': 'Christmas Day', 'weekday': 'Friday'}, ...]
     """
     url = ZONE_URLS[zone]
-    html = requests.get(url, timeout=15).text
+    # Add browser-like headers to avoid 403 blocking
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none"
+    }
+    html = requests.get(url, headers=headers, timeout=15).text
 
     try:
         from bs4 import BeautifulSoup  # requires beautifulsoup4 in requirements
@@ -367,6 +421,7 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         phone   = (row.get(SHEET_COL_PHONE, "") or "").strip()
         consent = (row.get(SHEET_COL_CONS, "")  or "").strip().lower()
         zone_in = (row.get(SHEET_COL_ZONE, "")  or "").strip().title()  # "Zone 3" or ""
+        day_in  = (row.get(SHEET_COL_DAY, "")   or "").strip().title()  # "Monday" or ""
 
         if not addr or not phone:
             continue
@@ -374,15 +429,21 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         if consent and not any(tok in consent for tok in CONSENT_OK):
             continue
 
-        # normalize "Zone X"
+        # normalize "Zone X" and collection day
         zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+        collection_day = day_in if day_in in {"Monday","Tuesday","Wednesday","Thursday","Friday"} else None
 
-        users.append({
+        user_dict = {
             "phone": normalize_whatsapp_number(phone),
             "street_address": addr,
             "street_label": street_number_and_name(addr),
-            **({"zone": zone} if zone else {})
-        })
+        }
+        if zone:
+            user_dict["zone"] = zone
+        if collection_day:
+            user_dict["collection_day"] = collection_day
+
+        users.append(user_dict)
     return users
 
 def current_subscribers() -> list[dict]:
@@ -455,8 +516,8 @@ app = Flask(__name__)
 def webhook():
     """
     Google Form -> Apps Script POSTs JSON here:
-      { street_address, phone_number, consent, zone? }
-    Upsert subscriber; save zone if provided; send WELCOME only on first subscribe.
+      { street_address, phone_number, consent, zone?, collection_day? }
+    Upsert subscriber; save zone/collection_day if provided; lookup if missing; send WELCOME only on first subscribe.
     """
     try:
         data = request.get_json(force=True) or {}
@@ -468,6 +529,7 @@ def webhook():
     address   = (data.get("street_address") or data.get("address") or "").strip()
     consent   = (data.get("consent") or "").strip().lower()
     zone_in   = (data.get("zone") or "").title()  # e.g., "Zone 3" (may be "")
+    day_in    = (data.get("collection_day") or "").title()  # e.g., "Monday" (may be "")
 
     if not raw_phone or not address:
         return jsonify({"status": "error", "message": "Missing phone or address"}), 400
@@ -480,8 +542,21 @@ def webhook():
         return jsonify({"status": "error", "message": "Invalid phone"}), 400
     street_label = street_number_and_name(address)
 
-    # 3) normalize/validate zone (save only if it’s one of the four)
+    # 3) normalize/validate zone and collection_day
     zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
+    collection_day = day_in if day_in in {"Monday","Tuesday","Wednesday","Thursday","Friday"} else None
+
+    # 3b) If zone or collection_day missing, try lookup
+    if not zone or not collection_day:
+        try:
+            lookup_result = lookup_zone_by_address(address)
+            if lookup_result:
+                if not zone:
+                    zone = lookup_result.get("zone")
+                if not collection_day:
+                    collection_day = lookup_result.get("collection_day")
+        except Exception as e:
+            print(f"⚠️ Zone lookup failed for {address}: {e}")
 
     # 4) upsert by phone (avoid duplicates)
     existing = next((u for u in USERS
@@ -492,12 +567,16 @@ def webhook():
         existing["phone"] = phone
         existing["street_address"] = address
         existing["street_label"] = street_label
-        if zone:                       # <— save zone if we got one
+        if zone:
             existing["zone"] = zone
+        if collection_day:
+            existing["collection_day"] = collection_day
     else:
         rec = {"phone": phone, "street_address": address, "street_label": street_label}
         if zone:
-            rec["zone"] = zone         # <— save zone on create
+            rec["zone"] = zone
+        if collection_day:
+            rec["collection_day"] = collection_day
         USERS.append(rec)
 
     try:
@@ -630,7 +709,8 @@ def run_reminders_now():
 def send_weekly_reminders() -> list[dict]:
     """
     Sends reminders to current subscribers.
-    Uses saved 'zone' on each subscriber; DOES NOT call township lookups here.
+    Uses saved 'zone' and 'collection_day' on each subscriber; DOES NOT call township lookups here.
+    Only sends reminder if tomorrow matches the user's collection_day.
     Holiday note order: per-date overrides -> scrape by zone -> local rules.
     Returns a list of outcome dicts for debugging.
     """
@@ -649,6 +729,7 @@ def send_weekly_reminders() -> list[dict]:
 
     tz = pytz.timezone("US/Eastern")
     tomorrow = datetime.now(tz).date() + timedelta(days=1)
+    tomorrow_weekday = tomorrow.strftime("%A")  # "Monday", "Tuesday", etc.
 
     seen: set[str] = set()
     for u in subs:
@@ -658,12 +739,22 @@ def send_weekly_reminders() -> list[dict]:
         addr_full = (u.get("street_address") or u.get("address") or "").strip()
         street_label = (u.get("street_label") or street_number_and_name(addr_full)).strip()
         zone = (u.get("zone") or "").title()  # "Zone X" if stored
+        collection_day = (u.get("collection_day") or "").title()  # "Monday", "Tuesday", etc.
 
         if not phone or phone in seen:
             continue
         seen.add(phone)
         if not addr_full:
             results.append({"phone": phone, "status": "skipped", "error": "missing_address"})
+            continue
+
+        # ---- CRITICAL: Check if tomorrow is this user's collection day
+        if not collection_day:
+            results.append({"phone": phone, "status": "skipped", "error": "missing_collection_day"})
+            continue
+
+        if collection_day != tomorrow_weekday:
+            # Not this user's collection day - skip silently
             continue
 
         # ---- recycling type for the week
@@ -752,8 +843,6 @@ def subs_debug():
     except Exception as e:
         info["error"] = str(e)
     return info
-
-import os, io, csv, textwrap, requests
 
 @app.route("/csv_debug")
 def csv_debug():
@@ -904,9 +993,6 @@ def holiday_debug():
     note = get_next_holiday_shift(zone, ref_date=fake)
     return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
 
-from flask import request, jsonify
-from datetime import datetime
-
 @app.route("/holiday_scrape_debug")
 def holiday_scrape_debug():
     """
@@ -925,9 +1011,6 @@ def holiday_scrape_debug():
 
     note = get_next_holiday_shift(zone, ref_date=d)
     return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
-
-from flask import request, jsonify
-from datetime import datetime
 
 @app.route("/holiday_trace")
 def holiday_trace():
@@ -984,7 +1067,9 @@ def holiday_trace():
             try:
                 token = get_auth_token()
                 out["token"]["status"] = "ok" if token else "empty"
-                zone = lookup_zone_by_address(addr)
+                lookup_result = lookup_zone_by_address(addr)
+                if lookup_result:
+                    zone = lookup_result.get("zone")
                 out["zone"]["source"] = "lookup"
             except Exception as e:
                 out["token"]["status"] = "error"
