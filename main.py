@@ -218,39 +218,33 @@ def _parse_date(txt: str, year: int) -> date | None:
 @lru_cache(maxsize=16)
 def _scrape_zone_index(zone: str, year: int) -> list[dict]:
     """
-    Load holiday collection schedule from holidays.json file.
+    Load holiday collection schedule using rule-based system.
     Returns: [{'date': date, 'name': 'Christmas Day', 'weekday': 'Friday'}, ...]
 
-    NOTE: The website blocks automated scraping, so we use a manually-maintained
-    JSON file instead. Update holidays.json annually from the township website.
+    Uses the official Lower Merion Township holiday shift chart:
+    - If holiday falls on Monday/Tuesday/etc., collection shifts per zone rules
+    - Rules are defined in holiday_rules.py based on township chart
     """
-    holidays_file = os.path.join(os.path.dirname(__file__), "holidays.json")
-
     try:
-        with open(holidays_file, 'r') as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        print(f"Warning: {holidays_file} not found, returning empty holiday list")
-        return []
-    except json.JSONDecodeError as e:
-        print(f"Error parsing {holidays_file}: {e}")
+        from holiday_rules import get_all_holidays_for_year, get_shifted_collection_day
+    except ImportError:
+        print("Warning: holiday_rules.py not found, returning empty holiday list")
         return []
 
-    year_str = str(year)
-    if year_str not in data:
-        print(f"Warning: No holiday data for year {year} in holidays.json")
+    # Get the official holidays for this year
+    holidays = get_all_holidays_for_year(year)
+    if not holidays:
+        print(f"Warning: No holiday data for year {year}")
         return []
 
-    holidays_list = data[year_str].get("holidays", [])
     entries: list[dict] = []
 
-    for holiday in holidays_list:
-        holiday_date = datetime.strptime(holiday["date"], "%Y-%m-%d").date()
+    for holiday in holidays:
+        holiday_date = holiday["date"]
         holiday_name = holiday["name"]
-        zone_info = holiday.get("zones", {}).get(zone, {})
 
-        # Get the shifted collection day for this zone
-        shifted_day = zone_info.get("shifted_day", "")
+        # Use the chart rules to determine shifted collection day
+        shifted_day = get_shifted_collection_day(holiday_date, zone)
 
         entries.append({
             "date": holiday_date,
