@@ -301,7 +301,7 @@ def _scrape_zone_index(zone: str, year: int) -> list[dict]:
 
     # ---- Fallback: regex across the raw HTML
     # Pattern 1: Look for "collected on WEEKDAY" or "moved to WEEKDAY" near dates
-    shift_pat = rf"(?P<date>(?:[A-Za-z]+,\s*)?[A-Za-z]+\s+\d{{1,2}},?\s*{year})[^.{{0,300}}?(?:collected?\s+on|move[sd]?\s+to|shifted?\s+to|on)\s+(?P<wd>Monday|Tuesday|Wednesday|Thursday|Friday)"
+    shift_pat = rf"(?P<date>(?:[A-Za-z]+,\s*)?[A-Za-z]+\s+\d{{1,2}},?\s*{year}).{{0,300}}?(?:collected?\s+on|move[sd]?\s+to|shifted?\s+to|on)\s+(?P<wd>Monday|Tuesday|Wednesday|Thursday|Friday)"
     for m in re.finditer(shift_pat, html, flags=re.I):
         dt = _parse_date(m.group("date"), year)
         # Try to find holiday name before the date
