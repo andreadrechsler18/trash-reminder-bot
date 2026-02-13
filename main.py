@@ -1032,8 +1032,26 @@ def holiday_scrape_debug():
     except ValueError:
         return jsonify({"error":"Bad iso date"}), 400
 
+    # Get the raw scraped data
+    idx = _scrape_zone_index(zone, d.year)
+    entries_serialized = [
+        {
+            "date": entry["date"].isoformat(),
+            "name": entry["name"],
+            "weekday": entry["weekday"]
+        }
+        for entry in idx
+    ]
+
     note = get_next_holiday_shift(zone, ref_date=d)
-    return jsonify({"iso": iso, "zone": zone, "holiday_note": note})
+    return jsonify({
+        "iso": iso,
+        "zone": zone,
+        "year": d.year,
+        "holiday_note": note,
+        "all_entries": entries_serialized,
+        "entry_count": len(entries_serialized)
+    })
 
 @app.route("/holiday_trace")
 def holiday_trace():
