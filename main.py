@@ -1106,6 +1106,27 @@ def health():
     """Simple health check endpoint for monitoring."""
     return jsonify({"status": "ok"}), 200
 
+@app.route("/subscribers_debug")
+def subscribers_debug():
+    """Show current subscribers for debugging."""
+    try:
+        subs = current_subscribers()
+        return jsonify({
+            "source": "Google Sheet" if SHEET_CSV_URL else "In-memory",
+            "count": len(subs),
+            "subscribers": [
+                {
+                    "phone": s.get("phone", "N/A"),
+                    "address": s.get("street_address", "N/A"),
+                    "zone": s.get("zone", "N/A"),
+                    "collection_day": s.get("collection_day", "N/A")
+                }
+                for s in subs[:10]  # Show first 10 only
+            ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 #######################
 
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
