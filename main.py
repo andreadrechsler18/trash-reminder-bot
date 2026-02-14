@@ -457,6 +457,11 @@ def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
 
 app = Flask(__name__)
 
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    """Health check endpoint for root path."""
+    return jsonify({"status": "ok", "service": "trash-reminder-bot"}), 200
+
 @app.route("/", methods=["POST"])
 def webhook():
     """
