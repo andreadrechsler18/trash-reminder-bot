@@ -1096,6 +1096,10 @@ def holiday_trace():
 
     return jsonify(out)
 
+@app.route("/health")
+def health():
+    """Simple health check endpoint for monitoring."""
+    return jsonify({"status": "ok"}), 200
 
 #######################
 
