@@ -279,10 +279,10 @@ def get_next_holiday_shift(zone: str | None, ref_date: date | None = None) -> st
             if shifted_day:
                 # Holiday causes a shift - show new day
                 weekday_name = holiday_date.strftime("%A")
-                return f"Holiday schedule: {holiday_name} on {weekday_name}. Pickup shifted to {shifted_day} this week."
+                return f"{holiday_name} on {weekday_name}. Pickup shifted to {shifted_day} this week."
             else:
                 # Holiday doesn't affect pickup (falls on weekend)
-                return f"Holiday notice: {holiday_name} this week. Your regular pickup schedule is unchanged."
+                return f"{holiday_name} this week. Your regular pickup schedule is unchanged."
 
     # No holiday this week
     return None
@@ -756,11 +756,13 @@ def send_weekly_reminders() -> list[dict]:
             results.append(outcome)
             continue
 
-        # 2-var BASIC: {{1}}=street_label, {{2}}=recycling_type
-        # HOLIDAY adds {{3}}=holiday_note
-        vars_map = {"1": street_label, "2": recycling_type}
+        # Build variable map based on template type
+        # BASIC: {{1}}=address, {{2}}=recycling_type
+        # HOLIDAY: {{1}}=address, {{2}}=holiday_note, {{3}}=recycling_type
         if holiday_note:
-            vars_map["3"] = holiday_note
+            vars_map = {"1": street_label, "2": holiday_note, "3": recycling_type}
+        else:
+            vars_map = {"1": street_label, "2": recycling_type}
 
         # ---- send
         try:
@@ -889,11 +891,12 @@ def run_reminders_for_date():
                 results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
                 continue
 
-            # ---- variables (2-var BASIC; HOLIDAY adds {{3}})
+            # ---- variables: BASIC {{1}}=address, {{2}}=recycling; HOLIDAY {{1}}=address, {{2}}=holiday, {{3}}=recycling
             rtype = get_recycling_type_for_date(fake)
-            vars_map = {"1": label, "2": rtype}
             if holiday_note:
-                vars_map["3"] = holiday_note
+                vars_map = {"1": label, "2": holiday_note, "3": rtype}
+            else:
+                vars_map = {"1": label, "2": rtype}
 
             try:
                 msg = send_whatsapp_template(to=phone, template_sid=template_sid, variables=vars_map)

@@ -16,7 +16,7 @@ def should_run_now():
     return False
 
 def main():
-    print("🚀 Cron start:", datetime.utcnow().isoformat(), "UTC", flush=True)
+    print("🚀 Cron start:", datetime.now(pytz.UTC).isoformat(), "UTC", flush=True)
 
     if should_run_now():
         try:
