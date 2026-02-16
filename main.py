@@ -552,7 +552,11 @@ def webhook():
         except Exception as e:
             print("⚠️ Welcome template send failed:", e)
 
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "zone": zone or "",
+        "collection_day": collection_day or ""
+    })
     
 @app.route("/whatsapp_webhook", methods=["POST"])
 def whatsapp_webhook():
