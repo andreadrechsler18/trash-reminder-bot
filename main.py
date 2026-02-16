@@ -861,6 +861,19 @@ def run_reminders_for_date():
             zone_saved = (u.get("zone") or "").title()
             zone = zone_param or (zone_saved if zone_saved in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None)
 
+            # ---- check if tomorrow (fake) matches user's collection day
+            collection_day = (u.get("collection_day") or "").strip()
+            fake_weekday = fake.strftime("%A")  # "Monday", "Tuesday", etc.
+
+            if not collection_day:
+                results.append({"phone": phone, "status": "skipped", "error": "missing_collection_day"})
+                continue
+
+            if collection_day != fake_weekday:
+                # Not this user's collection day - skip silently
+                print(f"Skipping {phone}: collection_day={collection_day}, fake day={fake_weekday}")
+                continue
+
             # ---- build holiday note: overrides -> scrape -> local rules
             holiday_note = None
             if zone:
@@ -887,6 +900,7 @@ def run_reminders_for_date():
             tpl_basic   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
             tpl_holiday = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_HOLIDAY", "")
             template_sid = tpl_holiday if (holiday_note and tpl_holiday) else tpl_basic
+            print(f"📅 {phone}: zone={zone}, fake={fake}, holiday_note={'YES' if holiday_note else 'NO'}, template={'HOLIDAY' if template_sid == tpl_holiday else 'BASIC'}")
             if not template_sid:
                 results.append({"phone": phone, "status": "skipped", "error": "missing_template_sid"})
                 continue
