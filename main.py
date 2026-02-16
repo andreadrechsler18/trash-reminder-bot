@@ -8,22 +8,32 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any
 from functools import lru_cache
 
+print("🔵 [STARTUP] Starting import of main.py...", flush=True)
+
 import pytz
 import requests
 from flask import Flask, request, Response, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
+print("🔵 [STARTUP] Successfully imported dependencies", flush=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration & Environment
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Twilio (must be set in Render → Environment for both Web and Cron services)
-TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
-# e.g. whatsapp:+16107728845  (← set this to your new business sender)
-TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
+print("🔵 [STARTUP] Loading Twilio environment variables...", flush=True)
+try:
+    TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
+    TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
+    # e.g. whatsapp:+16107728845  (← set this to your new business sender)
+    TWILIO_WHATSAPP_FROM = os.environ["TWILIO_WHATSAPP_FROM"]
+    print(f"🔵 [STARTUP] Twilio vars loaded: SID={TWILIO_ACCOUNT_SID[:10]}..., FROM={TWILIO_WHATSAPP_FROM}", flush=True)
+except KeyError as e:
+    print(f"❌ [STARTUP ERROR] Missing required environment variable: {e}", flush=True)
+    print("❌ Required variables: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM", flush=True)
+    raise
 
 # Template SIDs (Twilio Content API HX… values) — set these in env.
 TWILIO_TEMPLATE_SID_WEEKLY_BASIC   = os.environ.get("TWILIO_TEMPLATE_SID_REMINDER_BASIC", "")
@@ -461,7 +471,9 @@ def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
 # Flask app & routes
 # ──────────────────────────────────────────────────────────────────────────────
 
+print("🔵 [STARTUP] Creating Flask app...", flush=True)
 app = Flask(__name__)
+print("🔵 [STARTUP] Flask app created successfully", flush=True)
 
 @app.route("/", methods=["GET", "HEAD", "POST"])
 def webhook():
@@ -1138,3 +1150,5 @@ def health():
 # Note: no if __name__ == '__main__' run-loop here; the Web service should not
 # run a scheduler. Your Render Cron should import this module and call
 # send_weekly_reminders() at 8:00 PM ET (via a small `cron.py`).
+
+print("🔵 [STARTUP] main.py module loaded successfully. Flask app ready.", flush=True)
