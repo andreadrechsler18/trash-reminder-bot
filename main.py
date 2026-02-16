@@ -463,18 +463,18 @@ def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
 
 app = Flask(__name__)
 
-@app.route("/", methods=["GET", "HEAD"])
-def index():
-    """Health check endpoint for root path."""
-    return jsonify({"status": "ok", "service": "trash-reminder-bot"}), 200
-
-@app.route("/", methods=["POST"])
+@app.route("/", methods=["GET", "HEAD", "POST"])
 def webhook():
     """
-    Google Form -> Apps Script POSTs JSON here:
-      { street_address, phone_number, consent, zone?, collection_day? }
+    Health check (GET/HEAD) or Google Form webhook (POST).
+    POST: { street_address, phone_number, consent, zone?, collection_day? }
     Upsert subscriber; save zone/collection_day if provided; lookup if missing; send WELCOME only on first subscribe.
     """
+    # Health check for GET/HEAD requests
+    if request.method in ["GET", "HEAD"]:
+        return jsonify({"status": "ok", "service": "trash-reminder-bot"}), 200
+
+    # Webhook handler for POST requests
     try:
         data = request.get_json(force=True) or {}
     except Exception:
