@@ -546,9 +546,9 @@ def webhook():
             msg = send_whatsapp_template(
                 to=phone,
                 template_sid=TWILIO_TEMPLATE_SID_WELCOME,
-                variables={}
+                variables={"1": street_label}
             )
-            print(f"📩 welcome sid={msg.sid}")
+            print(f"📩 welcome sid={msg.sid} to {phone} with address={street_label}")
         except Exception as e:
             print("⚠️ Welcome template send failed:", e)
 
