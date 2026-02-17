@@ -650,10 +650,10 @@ def get_recycling_info(today: date) -> str:
 def get_help_message() -> str:
     """Return help message with available commands."""
     return (
-        "Available commands:\n"
-        "• 'Pickup' - When is my next pickup?\n"
-        "• 'Recycling' - What type this week?\n"
-        "• 'Help' - Show this message"
+        "Ask me:\n"
+        "• When is pickup? / When is collection? / Trash day?\n"
+        "• What is recycling? / Recycling this week?\n"
+        "• Help - Show this message"
     )
 
 
