@@ -447,14 +447,122 @@ def us_holiday_in_week(d: date) -> Optional[str]:
     if wk_mon <= nth_weekday(11,3,4) <= wk_sun: return "Thanksgiving Day"
     return None
 
+def get_holiday_date_in_week(d: date) -> Optional[tuple[str, date]]:
+    """Return (holiday_name, holiday_date) for the week containing d, or None."""
+    wk_mon = d - timedelta(days=d.weekday())
+    wk_sun = wk_mon + timedelta(days=6)
+    y = wk_mon.year
+    def in_week(m, dd):
+        t = date(y, m, dd)
+        return (wk_mon <= t <= wk_sun, t)
+    # fixed
+    is_in, dt = in_week(1,1)
+    if is_in: return ("New Year's Day", dt)
+    is_in, dt = in_week(6,19)
+    if is_in: return ("Juneteenth", dt)
+    is_in, dt = in_week(7,4)
+    if is_in: return ("Independence Day", dt)
+    is_in, dt = in_week(11,11)
+    if is_in: return ("Veterans Day", dt)
+    is_in, dt = in_week(12,25)
+    if is_in: return ("Christmas Day", dt)
+    # floating
+    import calendar
+    def nth_weekday(month, weekday, n):
+        days = [dt for dt in calendar.Calendar().itermonthdates(y, month) if dt.month==month and dt.weekday()==weekday]
+        return days[n-1]
+    def last_weekday(month, weekday):
+        days = [dt for dt in calendar.Calendar().itermonthdates(y, month) if dt.month==month and dt.weekday()==weekday]
+        return days[-1]
+
+    mlk = nth_weekday(1,0,3)
+    if wk_mon <= mlk <= wk_sun: return ("Martin Luther King Jr. Day", mlk)
+    pres = nth_weekday(2,0,3)
+    if wk_mon <= pres <= wk_sun: return ("Presidents Day", pres)
+    mem = last_weekday(5,0)
+    if wk_mon <= mem <= wk_sun: return ("Memorial Day", mem)
+    labor = nth_weekday(9,0,1)
+    if wk_mon <= labor <= wk_sun: return ("Labor Day", labor)
+    columbus = nth_weekday(10,0,2)
+    if wk_mon <= columbus <= wk_sun: return ("Columbus/Indigenous Peoples Day", columbus)
+    thanks = nth_weekday(11,3,4)
+    if wk_mon <= thanks <= wk_sun: return ("Thanksgiving Day", thanks)
+    return None
+
 def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
     if not zone:
         return None
-    name = us_holiday_in_week(d)
-    if not name:
+    holiday_info = get_holiday_date_in_week(d)
+    if not holiday_info:
         return None
+    name, holiday_date = holiday_info
     wd = (HOLIDAY_RULES.get(zone, {}) or {}).get(name)  # e.g., "Friday"
-    return f"{name}: collection on {wd}." if wd else f"{name}: collection may shift."
+    if wd:
+        weekday_name = holiday_date.strftime("%A")
+        return f"{name} on {weekday_name}. Pickup shifted to {wd} this week."
+    else:
+        return f"{name} this week. Your regular pickup schedule is unchanged."
+
+def get_actual_collection_day_for_week(normal_collection_day: str, zone: str, ref_date: date) -> tuple[str, str | None]:
+    """
+    Determine the actual collection day for the week containing ref_date.
+
+    Args:
+        normal_collection_day: User's normal collection day (e.g., "Thursday")
+        zone: User's zone (e.g., "Zone 3")
+        ref_date: Date to check (usually tomorrow)
+
+    Returns:
+        Tuple of (actual_collection_day, holiday_note)
+        - actual_collection_day: "Thursday" or "Wednesday" (if shifted)
+        - holiday_note: Holiday message if shift occurred, None otherwise
+
+    Example:
+        - Zone 3, normal collection Thursday, holiday on Thursday
+        - Chart says Thursday → Wednesday for Zone 3
+        - Returns ("Wednesday", "Christmas Day on Thursday. Pickup shifted to Wednesday this week.")
+    """
+    if not zone or not normal_collection_day:
+        return (normal_collection_day, None)
+
+    # Check if there's a holiday in this week
+    holiday_info = get_holiday_date_in_week(ref_date)
+    if not holiday_info:
+        # No holiday this week, use normal day
+        return (normal_collection_day, None)
+
+    holiday_name, holiday_date = holiday_info
+    holiday_weekday = holiday_date.strftime("%A")  # e.g., "Thursday"
+
+    # Try to get the note using the primary method first (more accurate)
+    try:
+        holiday_note = get_next_holiday_shift(zone, ref_date=ref_date)
+    except Exception as e:
+        print(f"get_next_holiday_shift error for {zone}:", e)
+        # Fallback to rules-based method
+        holiday_note = holiday_note_from_rules(zone, ref_date)
+
+    # Check if the holiday falls on a weekday and get shifted day from chart
+    from holiday_rules import HOLIDAY_SHIFT_RULES
+    zone_rules = HOLIDAY_SHIFT_RULES.get(zone, {})
+    shifted_day = zone_rules.get(holiday_weekday)  # e.g., "Wednesday"
+
+    if not shifted_day:
+        # Holiday falls on weekend or no shift rule - no change
+        return (normal_collection_day, None)
+
+    # If user's normal collection day is the same as the holiday weekday,
+    # their collection shifts to the shifted_day
+    if normal_collection_day == holiday_weekday:
+        return (shifted_day, holiday_note)
+    else:
+        # Holiday doesn't affect this user's collection
+        # Return normal day with a note that their schedule is unchanged
+        if holiday_note:
+            # Update note to say schedule unchanged
+            unchanged_note = f"{holiday_name} this week. Your regular pickup schedule is unchanged."
+            return (normal_collection_day, unchanged_note)
+        return (normal_collection_day, None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -708,14 +816,21 @@ def send_weekly_reminders() -> list[dict]:
             results.append({"phone": phone, "status": "skipped", "error": "missing_address"})
             continue
 
-        # ---- CRITICAL: Check if tomorrow is this user's collection day
+        # ---- CRITICAL: Check if tomorrow is this user's collection day (accounting for holiday shifts)
         if not collection_day:
             results.append({"phone": phone, "status": "skipped", "error": "missing_collection_day"})
             continue
 
-        if collection_day != tomorrow_weekday:
-            # Not this user's collection day - skip silently
+        # Get the actual collection day for this week (may be shifted due to holiday)
+        actual_collection_day, holiday_note_from_shift = get_actual_collection_day_for_week(
+            collection_day, zone, tomorrow
+        )
+
+        if actual_collection_day != tomorrow_weekday:
+            # Tomorrow is not collection day (neither normal nor shifted) - skip silently
             continue
+
+        # If we're here, tomorrow IS collection day (either normal or shifted)
 
         # ---- recycling type for the week
         try:
@@ -725,8 +840,10 @@ def send_weekly_reminders() -> list[dict]:
             recycling_type = "Recycling"
 
         # ---- build holiday note WITHOUT any live zone lookup
-        holiday_note = None
-        if zone in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"}:
+        # Start with the note from get_actual_collection_day_for_week if available
+        holiday_note = holiday_note_from_shift
+
+        if zone in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"} and holiday_note is None:
             # 1) explicit per-date override (optional, if you added HOLIDAY_OVERRIDES_JSON)
             try:
                 holiday_note = holiday_note_from_overrides(zone, tomorrow)
@@ -865,7 +982,7 @@ def run_reminders_for_date():
             zone_saved = (u.get("zone") or "").title()
             zone = zone_param or (zone_saved if zone_saved in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None)
 
-            # ---- check if tomorrow (fake) matches user's collection day
+            # ---- check if tomorrow (fake) matches user's collection day (accounting for holiday shifts)
             collection_day = (u.get("collection_day") or "").strip()
             fake_weekday = fake.strftime("%A")  # "Monday", "Tuesday", etc.
 
@@ -873,20 +990,29 @@ def run_reminders_for_date():
                 results.append({"phone": phone, "status": "skipped", "error": "missing_collection_day"})
                 continue
 
-            if collection_day != fake_weekday:
-                # Not this user's collection day - skip silently
-                print(f"Skipping {phone}: collection_day={collection_day}, fake day={fake_weekday}")
+            # Get the actual collection day for this week (may be shifted due to holiday)
+            actual_collection_day, holiday_note_from_shift = get_actual_collection_day_for_week(
+                collection_day, zone, fake
+            )
+
+            if actual_collection_day != fake_weekday:
+                # Tomorrow is not collection day (neither normal nor shifted) - skip silently
+                print(f"Skipping {phone}: collection_day={collection_day}, actual={actual_collection_day}, fake day={fake_weekday}")
                 continue
 
+            # If we're here, tomorrow IS collection day (either normal or shifted)
+
             # ---- build holiday note: overrides -> scrape -> local rules
-            holiday_note = None
-            if zone:
+            # Start with the note from get_actual_collection_day_for_week if available
+            holiday_note = holiday_note_from_shift
+
+            if zone and holiday_note is None:
                 # 1) explicit per-date override (if you wired HOLIDAY_OVERRIDES_JSON)
                 try:
                     holiday_note = holiday_note_from_overrides(zone, fake)
                 except NameError:
                     holiday_note = None
-                # 2) scrape the zone’s holiday page (bs4 parser)
+                # 2) scrape the zone's holiday page (bs4 parser)
                 if holiday_note is None:
                     try:
                         holiday_note = get_next_holiday_shift(zone, ref_date=fake)
