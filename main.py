@@ -652,8 +652,7 @@ def get_help_message() -> str:
     return (
         "Ask me:\n"
         "• When is pickup? / When is collection? / Trash day?\n"
-        "• What is recycling? / Recycling this week?\n"
-        "• Help - Show this message"
+        "• What is recycling? / Recycling this week?"
     )
 
 
