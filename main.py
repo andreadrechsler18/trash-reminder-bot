@@ -566,6 +566,98 @@ def get_actual_collection_day_for_week(normal_collection_day: str, zone: str, re
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Interactive messaging helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def parse_message_intent(message: str) -> str:
+    """
+    Parse incoming message to detect user intent.
+
+    Returns: "pickup", "recycling", "help", or "unknown"
+    """
+    msg = message.lower().strip()
+
+    # Help keywords
+    if any(word in msg for word in ["help", "commands", "command", "?"]):
+        return "help"
+
+    # Pickup/collection keywords
+    if any(word in msg for word in ["pickup", "collection", "trash", "when", "day", "schedule"]):
+        return "pickup"
+
+    # Recycling keywords
+    if any(word in msg for word in ["recycling", "recycle", "paper", "commingled", "what"]):
+        return "recycling"
+
+    return "unknown"
+
+def get_next_pickup_info(zone: str, collection_day: str, today: date) -> str:
+    """
+    Get next pickup day info with holiday awareness.
+
+    Returns formatted message like:
+    - "Pickup: Thursday"
+    - "Pickup: Wednesday (Christmas Day holiday shift)"
+    """
+    # Find next occurrence of collection day
+    days_ahead = 0
+    current_date = today
+
+    # Look up to 7 days ahead to find next pickup
+    for i in range(7):
+        check_date = today + timedelta(days=i)
+        check_weekday = check_date.strftime("%A")
+
+        # Get actual collection day for this week (accounting for holidays)
+        actual_day, holiday_note = get_actual_collection_day_for_week(
+            collection_day, zone, check_date
+        )
+
+        if check_weekday == actual_day:
+            # Found the next pickup day
+            if i == 0:
+                day_text = "today"
+            elif i == 1:
+                day_text = "tomorrow"
+            else:
+                day_text = actual_day
+
+            if holiday_note:
+                # Extract just the holiday name from the note
+                holiday_match = re.match(r"(.*?) on \w+\.", holiday_note)
+                if holiday_match:
+                    holiday_name = holiday_match.group(1)
+                    return f"Pickup: {day_text} ({holiday_name} shift)"
+
+            return f"Pickup: {day_text}"
+
+    # Fallback to normal day
+    return f"Pickup: {collection_day}"
+
+def get_recycling_info(today: date) -> str:
+    """
+    Get recycling type for current week.
+
+    Returns formatted message like: "Recycling: Paper this week"
+    """
+    try:
+        recycling_type = get_recycling_type_for_date(today)
+        return f"Recycling: {recycling_type} this week"
+    except Exception as e:
+        print(f"Error getting recycling type: {e}")
+        return "Recycling: Check your local schedule"
+
+def get_help_message() -> str:
+    """Return help message with available commands."""
+    return (
+        "Available commands:\n"
+        "• 'Pickup' - When is my next pickup?\n"
+        "• 'Recycling' - What type this week?\n"
+        "• 'Help' - Show this message"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Flask app & routes
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -668,7 +760,10 @@ def webhook():
     
 @app.route("/whatsapp_webhook", methods=["POST"])
 def whatsapp_webhook():
-    """Inbound WhatsApp messages (session replies)."""
+    """
+    Inbound WhatsApp messages webhook.
+    Handles: help, pickup questions, recycling questions, unsubscribe.
+    """
     form = dict(request.form)
     print("Twilio incoming webhook:", form)
     from_number = (form.get("From") or "").strip()  # e.g., 'whatsapp:+1...'
@@ -679,79 +774,75 @@ def whatsapp_webhook():
         resp.message("Missing sender.")
         return Response(str(resp), mimetype="application/xml")
 
-    lower = body.lower()
+    # Normalize phone number for lookup
+    normalized_phone = normalize_whatsapp_number(from_number)
+    if not normalized_phone:
+        normalized_phone = from_number
 
-    # Unsubscribe
+    # Handle unsubscribe commands
+    lower = body.lower()
     if lower in {"stop", "stop all", "cancel", "unsubscribe", "quit", "end"}:
+        # Try to remove from in-memory list (if still used)
         removed = False
         for i in range(len(USERS) - 1, -1, -1):
             p = USERS[i].get("phone") or USERS[i].get("phone_number")
-            if p and p.lower() == from_number.lower():
-                USERS.pop(i); removed = True
+            if p and p.lower() == normalized_phone.lower():
+                USERS.pop(i)
+                removed = True
         if removed:
-            try: save_users(USERS)
-            except Exception as e: print("save_users STOP error:", e)
-            resp.message("You are unsubscribed from trash & recycling reminders.")
-        else:
-            resp.message("You are not currently subscribed.")
+            try:
+                save_users(USERS)
+            except Exception as e:
+                print("save_users STOP error:", e)
+        resp.message("You are unsubscribed from trash & recycling reminders.")
         return Response(str(resp), mimetype="application/xml")
 
-    # Quick “recycling” Q&A (works for anyone)
-    if "recycl" in lower:
-        tz = pytz.timezone("US/Eastern")
-        today = datetime.now(tz).date()
-        rtype = get_recycling_type_for_date(today)
-        resp.message(f"This week is {rtype} recycling.\nReply STOP to unsubscribe.")
+    # Parse message intent
+    intent = parse_message_intent(body)
+
+    # Look up user from current subscribers
+    try:
+        subs = current_subscribers()
+        user = next((u for u in subs if (u.get("phone") or u.get("phone_number", "")).lower() == normalized_phone.lower()), None)
+    except Exception as e:
+        print(f"Error loading subscribers: {e}")
+        user = None
+
+    tz = pytz.timezone("US/Eastern")
+    today = datetime.now(tz).date()
+
+    # Handle different intents
+    if intent == "help":
+        resp.message(get_help_message())
         return Response(str(resp), mimetype="application/xml")
 
-    # “trash / pickup” for subscribed users
-    if "trash" in lower or "pickup" in lower:
-        user = next((u for u in USERS
-                     if (u.get("phone") or u.get("phone_number","")).lower() == from_number.lower()), None)
-        if user:
-            tz = pytz.timezone("US/Eastern")
-            tomorrow   = datetime.now(tz).date() + timedelta(days=1)
-            street_lbl = user.get("street_label") or street_number_and_name(user.get("street_address", ""))
-            rtype      = get_recycling_type_for_date(tomorrow)
-            zone       = (user.get("zone") or "").title()  # ← prefer saved zone
-            # build holiday note: overrides -> scrape -> rules (no live zone lookup)
-            note = None
-            if zone in {"Zone 1","Zone 2","Zone 3","Zone 4"}:
-                try:
-                    note = holiday_note_from_overrides(zone, tomorrow)
-                except NameError:
-                    note = None
-                if note is None:
-                    try:
-                        note = get_next_holiday_shift(zone, ref_date=tomorrow)
-                    except Exception as e:
-                        print(f"get_next_holiday_shift error for {zone}:", e)
-                        note = None
-                if note is None:
-                    try:
-                        note = holiday_note_from_rules(zone, tomorrow)
-                    except NameError:
-                        note = None
-
-            msg = f"Reminder: Tomorrow is trash day for {street_lbl}.\nRecycling: {rtype}."
-            if note:
-                msg += f"\n{note}"
-            resp.message(msg)
-        else:
-            form_url = os.environ.get("PUBLIC_SIGNUP_URL", "")
-            resp.message(f"I don’t have you on file. Use the sign-up form: {form_url}\nOr reply “JOIN 123 Main St, Town, ZIP”.")
+    elif intent == "recycling":
+        # Anyone can ask about recycling
+        msg = get_recycling_info(today)
+        resp.message(msg)
         return Response(str(resp), mimetype="application/xml")
 
-    # Help text
-    form_url = os.environ.get("PUBLIC_SIGNUP_URL", "")
-    resp.message(
-        "Hi! I can send trash & recycling timing reminders.\n"
-        "• Text your address to subscribe (or use the form).\n"
-        "• Ask: “What’s recycling this week?”\n"
-        "• Reply STOP to unsubscribe.\n"
-        f"{form_url}"
-    )
-    return Response(str(resp), mimetype="application/xml")
+    elif intent == "pickup":
+        # Need to be a subscriber to get pickup info
+        if not user:
+            resp.message("Please sign up first to get pickup information.")
+            return Response(str(resp), mimetype="application/xml")
+
+        zone = (user.get("zone") or "").title()
+        collection_day = (user.get("collection_day") or "").title()
+
+        if not collection_day:
+            resp.message("Your collection day is not set. Please update your information.")
+            return Response(str(resp), mimetype="application/xml")
+
+        msg = get_next_pickup_info(zone, collection_day, today)
+        resp.message(msg)
+        return Response(str(resp), mimetype="application/xml")
+
+    else:
+        # Unknown intent - show help
+        resp.message(get_help_message())
+        return Response(str(resp), mimetype="application/xml")
 
 @app.route("/run_reminders_now", methods=["GET"])
 def run_reminders_now():
