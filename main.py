@@ -42,6 +42,18 @@ CONSENT_OK = [s.strip().lower() for s in os.getenv("SHEET_CONSENT_OK", "agree,ye
 VALID_PREFERRED_TIMES = {"5 PM", "6 PM", "7 PM", "8 PM"}
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
+def _normalize_preferred_time(raw: str) -> str | None:
+    """Normalize '8pm' / '8 pm' / '8 PM' -> '8 PM'. Returns None if invalid."""
+    if not raw:
+        return None
+    s = raw.strip().upper().replace(" ", "")  # "8PM"
+    m = re.match(r"^(\d{1,2})PM$", s)
+    if m:
+        hour = m.group(1)
+        normalized = f"{hour} PM"
+        return normalized if normalized in VALID_PREFERRED_TIMES else None
+    return raw if raw in VALID_PREFERRED_TIMES else None
+
 WEEKDAY_RX = re.compile(r"\b(Monday|Tuesday|Wednesday|Thursday|Friday)\b", re.I)
 HOLIDAY_RULES_JSON     = os.getenv("HOLIDAY_RULES_JSON", "").strip()
 HOLIDAY_OVERRIDES_JSON = os.getenv("HOLIDAY_OVERRIDES_JSON", "").strip()
@@ -377,7 +389,7 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         consent = (row.get(SHEET_COL_CONS, "")  or "").strip().lower()
         zone_in = (row.get(SHEET_COL_ZONE, "")  or "").strip().title()  # "Zone 3" or ""
         day_in  = (row.get(SHEET_COL_DAY, "")   or "").strip().title()  # "Monday" or ""
-        time_in = (row.get(SHEET_COL_TIME, "")  or "").strip()         # "5 PM" or ""
+        time_in = (row.get(SHEET_COL_TIME, "")  or "").strip()         # "5 PM" or "8pm"
 
         if not addr or not phone:
             continue
@@ -388,7 +400,8 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         # normalize "Zone X" and collection day
         zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
         collection_day = day_in if day_in in {"Monday","Tuesday","Wednesday","Thursday","Friday"} else None
-        preferred_time = time_in if time_in in VALID_PREFERRED_TIMES else None
+        # normalize preferred time: "8pm" -> "8 PM", "5 PM" -> "5 PM"
+        preferred_time = _normalize_preferred_time(time_in)
 
         user_dict = {
             "phone": normalize_whatsapp_number(phone),
