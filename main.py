@@ -36,7 +36,11 @@ SHEET_COL_PHONE = os.getenv("SHEET_COL_PHONE", "Phone Number")
 SHEET_COL_ZONE  = os.getenv("SHEET_COL_ZONE", "Zone")  # optional column in your Sheet
 SHEET_COL_DAY   = os.getenv("SHEET_COL_DAY", "Collection Day")  # optional column
 SHEET_COL_CONS  = os.getenv("SHEET_COL_CONSENT", "Consent to Receive Messages")
+SHEET_COL_TIME  = os.getenv("SHEET_COL_TIME", "Preferred Time")
 CONSENT_OK = [s.strip().lower() for s in os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1").split(",")]
+
+VALID_PREFERRED_TIMES = {"5 PM", "6 PM", "7 PM", "8 PM"}
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 WEEKDAY_RX = re.compile(r"\b(Monday|Tuesday|Wednesday|Thursday|Friday)\b", re.I)
 HOLIDAY_RULES_JSON     = os.getenv("HOLIDAY_RULES_JSON", "").strip()
@@ -373,6 +377,7 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         consent = (row.get(SHEET_COL_CONS, "")  or "").strip().lower()
         zone_in = (row.get(SHEET_COL_ZONE, "")  or "").strip().title()  # "Zone 3" or ""
         day_in  = (row.get(SHEET_COL_DAY, "")   or "").strip().title()  # "Monday" or ""
+        time_in = (row.get(SHEET_COL_TIME, "")  or "").strip()         # "5 PM" or ""
 
         if not addr or not phone:
             continue
@@ -383,6 +388,7 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         # normalize "Zone X" and collection day
         zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
         collection_day = day_in if day_in in {"Monday","Tuesday","Wednesday","Thursday","Friday"} else None
+        preferred_time = time_in if time_in in VALID_PREFERRED_TIMES else None
 
         user_dict = {
             "phone": normalize_whatsapp_number(phone),
@@ -393,6 +399,8 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
             user_dict["zone"] = zone
         if collection_day:
             user_dict["collection_day"] = collection_day
+        if preferred_time:
+            user_dict["preferred_time"] = preferred_time
 
         users.append(user_dict)
     return users
@@ -846,8 +854,16 @@ def whatsapp_webhook():
 @app.route("/run_reminders_now", methods=["GET"])
 def run_reminders_now():
     """Manually trigger the reminder job and always return JSON (never 500 on None)."""
+    # Auth check
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 403
+
+    # Parse preferred time filter
+    time_param = (request.args.get("time") or "").strip()
+    preferred_time = time_param if time_param in VALID_PREFERRED_TIMES else None
+
     try:
-        results = send_weekly_reminders()
+        results = send_weekly_reminders(preferred_time=preferred_time)
     except Exception as e:
         # If the worker itself blew up, return a JSON error instead of a 500 stacktrace
         print("send_weekly_reminders raised:", e)
@@ -858,18 +874,19 @@ def run_reminders_now():
         print(f"send_weekly_reminders returned {type(results)}; coercing to []")
         results = []
 
-    return jsonify({"count": len(results), "results": results})
+    return jsonify({"count": len(results), "results": results, "preferred_time": preferred_time or "all"})
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reminder engine (called by cron; not scheduled in-process here)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def send_weekly_reminders() -> list[dict]:
+def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
     """
     Sends reminders to current subscribers.
     Uses saved 'zone' and 'collection_day' on each subscriber; DOES NOT call township lookups here.
     Only sends reminder if tomorrow matches the user's collection_day.
     Holiday note order: per-date overrides -> scrape by zone -> local rules.
+    If preferred_time is specified, only sends to subscribers with that preferred time.
     Returns a list of outcome dicts for debugging.
     """
     results: list[dict] = []
@@ -884,6 +901,14 @@ def send_weekly_reminders() -> list[dict]:
     if not subs:
         print("No subscribers found.")
         return results
+
+    # Filter by preferred time if specified
+    if preferred_time:
+        subs = [u for u in subs if (u.get("preferred_time") or "8 PM") == preferred_time]
+        print(f"Filtered to {len(subs)} subscribers for preferred_time={preferred_time}")
+        if not subs:
+            print(f"No subscribers found for preferred_time={preferred_time}")
+            return results
 
     tz = pytz.timezone("US/Eastern")
     tomorrow = datetime.now(tz).date() + timedelta(days=1)
@@ -1049,14 +1074,27 @@ def run_reminders_for_date():
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
+    # Auth check
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 403
+
     # Optional per-request zone override (testing only)
     zone_param = (request.args.get("zone") or "").title()
     if zone_param not in {"Zone 1", "Zone 2", "Zone 3", "Zone 4"}:
         zone_param = None
 
+    # Optional preferred time filter
+    time_param = (request.args.get("time") or "").strip()
+    preferred_time = time_param if time_param in VALID_PREFERRED_TIMES else None
+
     results: list[dict] = []
     try:
         subs = current_subscribers()  # or USERS if you prefer
+
+        # Filter by preferred time if specified
+        if preferred_time:
+            subs = [u for u in subs if (u.get("preferred_time") or "8 PM") == preferred_time]
+
         seen: set[str] = set()
 
         for u in subs:
@@ -1154,7 +1192,7 @@ def run_reminders_for_date():
     except Exception as e:
         return jsonify({"error": str(e), "results": results}), 500
 
-    return jsonify({"count": len(results), "results": results})
+    return jsonify({"count": len(results), "results": results, "preferred_time": preferred_time or "all"})
 
 @app.route("/env_check")
 def env_check():
