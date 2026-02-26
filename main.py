@@ -82,6 +82,7 @@ ZONE_URLS: Dict[str, str] = {
 
 # Storage
 USERS_FILE = "users.json"
+SNOOZES_FILE = "snoozes.json"
 
 # Public opt-in form (optional, shown in /whatsapp_webhook help text)
 FORM_URL = os.environ.get("PUBLIC_SIGNUP_URL", "https://forms.gle/your-google-form-id")
@@ -373,6 +374,24 @@ def save_users(users: list[dict]) -> None:
 
 USERS: list[dict] = load_users()
 
+
+def load_snoozes() -> list[dict]:
+    """Load pending snooze requests from disk."""
+    if os.path.exists(SNOOZES_FILE):
+        with open(SNOOZES_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except Exception:
+                return []
+    return []
+
+
+def save_snoozes(snoozes: list[dict]) -> None:
+    """Persist snooze requests to disk."""
+    with open(SNOOZES_FILE, "w") as f:
+        json.dump(snoozes, f, indent=2)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV loader and 'where to get subscribers' helper
 # ──────────────────────────────────────────────────────────────────────────────
@@ -594,9 +613,14 @@ def parse_message_intent(message: str) -> str:
     """
     Parse incoming message to detect user intent.
 
-    Returns: "pickup", "recycling", "help", or "unknown"
+    Returns: "snooze", "pickup", "recycling", "help", or "unknown"
     """
     msg = message.lower().strip()
+
+    # Snooze / remind-later keywords (checked first so "remind me later" doesn't match pickup)
+    if any(phrase in msg for phrase in ["remind me later", "remind me in the morning",
+                                        "remind later", "snooze", "remind me tomorrow"]):
+        return "snooze"
 
     # Help keywords
     if any(word in msg for word in ["help", "commands", "command", "?"]):
@@ -842,6 +866,37 @@ def whatsapp_webhook():
         resp.message(msg)
         return Response(str(resp), mimetype="application/xml")
 
+    elif intent == "snooze":
+        if not user:
+            resp.message("Please sign up first to use reminders.")
+            return Response(str(resp), mimetype="application/xml")
+
+        # Build a text reminder to resend at 6 AM tomorrow morning
+        addr_full = (user.get("street_address") or user.get("address") or "").strip()
+        street_label = (user.get("street_label") or street_number_and_name(addr_full)).strip()
+        tomorrow = today + timedelta(days=1)
+        recycling_type = get_recycling_type_for_date(tomorrow)
+
+        reminder_text = (
+            f"Good morning! Reminder: trash and {recycling_type.lower()} recycling "
+            f"pickup is today for {street_label}. Don't forget to put your bins out!"
+        )
+
+        # Save snooze request
+        snoozes = load_snoozes()
+        # Replace any existing snooze for this phone number
+        snoozes = [s for s in snoozes if s.get("phone") != normalized_phone]
+        snoozes.append({
+            "phone": normalized_phone,
+            "reminder_text": reminder_text,
+            "requested_at": datetime.now(tz).isoformat(),
+        })
+        save_snoozes(snoozes)
+        print(f"Snooze saved for {normalized_phone}, will resend at 6 AM")
+
+        resp.message("Got it! I'll remind you again at 6 AM tomorrow morning.")
+        return Response(str(resp), mimetype="application/xml")
+
     elif intent == "pickup":
         # Need to be a subscriber to get pickup info
         if not user:
@@ -863,6 +918,39 @@ def whatsapp_webhook():
         # Unknown intent - show help
         resp.message(get_help_message())
         return Response(str(resp), mimetype="application/xml")
+
+@app.route("/process_snoozes", methods=["GET"])
+def process_snoozes():
+    """Send snoozed reminders (called by 6 AM cron job)."""
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 403
+
+    snoozes = load_snoozes()
+    if not snoozes:
+        return jsonify({"count": 0, "results": []})
+
+    results = []
+    for s in snoozes:
+        phone = s.get("phone", "")
+        text = s.get("reminder_text", "")
+        if not phone or not text:
+            continue
+        try:
+            msg = twilio_client().messages.create(
+                from_=TWILIO_WHATSAPP_FROM,
+                to=phone,
+                body=text,
+            )
+            results.append({"phone": phone, "sid": msg.sid, "status": "sent"})
+            print(f"Snooze reminder sent to {phone}, sid={msg.sid}")
+        except Exception as e:
+            results.append({"phone": phone, "sid": None, "status": "error", "error": str(e)})
+            print(f"Snooze send failed for {phone}: {e}")
+
+    # Clear all processed snoozes
+    save_snoozes([])
+    return jsonify({"count": len(results), "results": results})
+
 
 @app.route("/run_reminders_now", methods=["GET"])
 def run_reminders_now():
