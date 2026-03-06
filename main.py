@@ -416,11 +416,21 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         if consent and not any(tok in consent for tok in CONSENT_OK):
             continue
 
-        # normalize "Zone X" and collection day
+        # normalize "Zone X" and collection day from sheet
         zone = zone_in if zone_in in {"Zone 1","Zone 2","Zone 3","Zone 4"} else None
         collection_day = day_in if day_in in {"Monday","Tuesday","Wednesday","Thursday","Friday"} else None
         # normalize preferred time: "8pm" -> "8 PM", "5 PM" -> "5 PM"
         preferred_time = _normalize_preferred_time(time_in)
+
+        # Use address lookup as authoritative source for zone/collection_day
+        # (township data is more reliable than user-entered form data)
+        try:
+            lookup_result = lookup_zone_by_address(addr)
+            if lookup_result:
+                zone = lookup_result.get("zone") or zone
+                collection_day = lookup_result.get("collection_day") or collection_day
+        except Exception as e:
+            print(f"Zone lookup failed for {addr}: {e}")
 
         user_dict = {
             "phone": normalize_whatsapp_number(phone),
