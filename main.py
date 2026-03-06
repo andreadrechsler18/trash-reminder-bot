@@ -1147,7 +1147,7 @@ def subs_debug():
         subs = current_subscribers()
         info["source"] = "sheet" if os.getenv("SHEET_CSV_URL") else "memory"
         info["count"] = len(subs)
-        info["sample"] = subs[:3]
+        info["sample"] = subs
     except Exception as e:
         info["error"] = str(e)
     return info
