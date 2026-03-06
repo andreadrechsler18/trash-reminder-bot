@@ -422,15 +422,17 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         # normalize preferred time: "8pm" -> "8 PM", "5 PM" -> "5 PM"
         preferred_time = _normalize_preferred_time(time_in)
 
-        # Use address lookup as authoritative source for zone/collection_day
-        # (township data is more reliable than user-entered form data)
-        try:
-            lookup_result = lookup_zone_by_address(addr)
-            if lookup_result:
-                zone = lookup_result.get("zone") or zone
-                collection_day = lookup_result.get("collection_day") or collection_day
-        except Exception as e:
-            print(f"Zone lookup failed for {addr}: {e}")
+        # Fill in missing zone/collection_day from address lookup
+        if not zone or not collection_day:
+            try:
+                lookup_result = lookup_zone_by_address(addr)
+                if lookup_result:
+                    if not zone:
+                        zone = lookup_result.get("zone")
+                    if not collection_day:
+                        collection_day = lookup_result.get("collection_day")
+            except Exception as e:
+                print(f"Zone lookup failed for {addr}: {e}")
 
         user_dict = {
             "phone": normalize_whatsapp_number(phone),
