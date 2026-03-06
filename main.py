@@ -1156,9 +1156,6 @@ def reminder_preview():
            /reminder_preview?iso=YYYY-MM-DD  (pretend tomorrow is this date)
            /reminder_preview?time=7+PM       (filter by preferred time)
     """
-    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
-        return jsonify({"error": "unauthorized"}), 403
-
     tz = pytz.timezone("US/Eastern")
     now_et = datetime.now(tz)
 
