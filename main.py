@@ -449,17 +449,19 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         users.append(user_dict)
     return users
 
-def current_subscribers() -> list[dict]:
-    """Return current subscribers from the Sheet if configured; else fall back to in-memory USERS."""
+def current_subscribers() -> tuple[list[dict], str]:
+    """Return (subscribers, source) from the Sheet if configured; else fall back to in-memory USERS.
+    source is 'sheet' or 'memory' for diagnostic logging.
+    """
     if SHEET_CSV_URL:
         try:
             subs = load_users_from_sheet(SHEET_CSV_URL)
             if subs:
-                return subs
+                return subs, "sheet"
         except Exception as e:
             print(f"⚠️ Failed to load SHEET_CSV_URL: {e}")
     # fallback: in-memory (from / webhook)
-    return USERS or []
+    return USERS or [], "memory"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # holiday helpers 
@@ -859,7 +861,7 @@ def whatsapp_webhook():
 
     # Look up user from current subscribers
     try:
-        subs = current_subscribers()
+        subs, _src = current_subscribers()
         user = next((u for u in subs if (u.get("phone") or u.get("phone_number", "")).lower() == normalized_phone.lower()), None)
     except Exception as e:
         print(f"Error loading subscribers: {e}")
@@ -988,7 +990,17 @@ def run_reminders_now():
         print(f"send_weekly_reminders returned {type(results)}; coercing to []")
         results = []
 
-    return jsonify({"count": len(results), "results": results, "preferred_time": preferred_time or "all"})
+    tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(tz)
+    tomorrow = now_et.date() + timedelta(days=1)
+    return jsonify({
+        "count": len(results),
+        "results": results,
+        "preferred_time": preferred_time or "all",
+        "now_et": now_et.isoformat(),
+        "tomorrow": tomorrow.isoformat(),
+        "tomorrow_weekday": tomorrow.strftime("%A"),
+    })
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reminder engine (called by cron; not scheduled in-process here)
@@ -1007,10 +1019,12 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
 
     # Load subs (sheet or memory)
     try:
-        subs = current_subscribers()  # or USERS if you don't have this helper
+        subs, subs_source = current_subscribers()
     except Exception as e:
         print("current_subscribers() error:", e)
         return results
+
+    print(f"[DIAG] send_weekly_reminders: source={subs_source}, total_subs={len(subs)}, preferred_time_filter={preferred_time}")
 
     if not subs:
         print("No subscribers found.")
@@ -1025,8 +1039,10 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
             return results
 
     tz = pytz.timezone("US/Eastern")
-    tomorrow = datetime.now(tz).date() + timedelta(days=1)
+    now_et = datetime.now(tz)
+    tomorrow = now_et.date() + timedelta(days=1)
     tomorrow_weekday = tomorrow.strftime("%A")  # "Monday", "Tuesday", etc.
+    print(f"[DIAG] now_et={now_et.isoformat()}, tomorrow={tomorrow.isoformat()} ({tomorrow_weekday})")
 
     seen: set[str] = set()
     for u in subs:
@@ -1047,6 +1063,7 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
 
         # ---- CRITICAL: Check if tomorrow is this user's collection day (accounting for holiday shifts)
         if not collection_day:
+            print(f"[DIAG] {phone}: SKIP - missing collection_day (zone={zone}, addr={street_label})")
             results.append({"phone": phone, "status": "skipped", "error": "missing_collection_day"})
             continue
 
@@ -1054,6 +1071,10 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
         actual_collection_day, holiday_note_from_shift = get_actual_collection_day_for_week(
             collection_day, zone, tomorrow
         )
+
+        print(f"[DIAG] {phone}: collection_day={collection_day}, zone={zone}, "
+              f"actual_collection_day={actual_collection_day}, tomorrow_weekday={tomorrow_weekday}, "
+              f"match={actual_collection_day == tomorrow_weekday}")
 
         if actual_collection_day != tomorrow_weekday:
             # Tomorrow is not collection day (neither normal nor shifted) - skip silently
@@ -1127,11 +1148,78 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
 
     return results
 
-###########temporary, delete from final version:
-@app.route("/_debug_worker_type")
-def _debug_worker_type():
-    r = send_weekly_reminders()
-    return {"type": str(type(r)), "is_list": isinstance(r, list), "len_safe": 0 if not isinstance(r, list) else len(r)}
+@app.route("/reminder_preview")
+def reminder_preview():
+    """
+    Dry-run the reminder engine: shows exactly what would happen without sending.
+    Usage: /reminder_preview           (uses real 'tomorrow')
+           /reminder_preview?iso=YYYY-MM-DD  (pretend tomorrow is this date)
+           /reminder_preview?time=7+PM       (filter by preferred time)
+    """
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 403
+
+    tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(tz)
+
+    iso = (request.args.get("iso") or "").strip()
+    if iso:
+        try:
+            tomorrow = datetime.strptime(iso, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+    else:
+        tomorrow = now_et.date() + timedelta(days=1)
+
+    tomorrow_weekday = tomorrow.strftime("%A")
+
+    time_param = (request.args.get("time") or "").strip()
+    preferred_time = time_param if time_param in VALID_PREFERRED_TIMES else None
+
+    try:
+        subs, subs_source = current_subscribers()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if preferred_time:
+        subs = [u for u in subs if (u.get("preferred_time") or "8 PM") == preferred_time]
+
+    preview = []
+    for u in subs:
+        phone_raw = (u.get("phone") or u.get("phone_number") or "").strip()
+        phone = normalize_whatsapp_number(phone_raw) if phone_raw else ""
+        zone = (u.get("zone") or "").title()
+        collection_day = (u.get("collection_day") or "").title()
+        pref_time = u.get("preferred_time") or "(none)"
+        street = (u.get("street_label") or u.get("street_address") or "").strip()
+
+        if not collection_day:
+            preview.append({"phone": phone, "street": street, "zone": zone,
+                            "collection_day": None, "actual_day": None,
+                            "tomorrow": tomorrow_weekday, "would_send": False,
+                            "reason": "missing_collection_day", "preferred_time": pref_time})
+            continue
+
+        actual_day, holiday_note = get_actual_collection_day_for_week(collection_day, zone, tomorrow)
+        would_send = actual_day == tomorrow_weekday
+
+        preview.append({
+            "phone": phone, "street": street, "zone": zone,
+            "collection_day": collection_day, "actual_day": actual_day,
+            "tomorrow": tomorrow_weekday, "would_send": would_send,
+            "holiday_note": holiday_note, "preferred_time": pref_time,
+        })
+
+    return jsonify({
+        "now_et": now_et.isoformat(),
+        "tomorrow": tomorrow.isoformat(),
+        "tomorrow_weekday": tomorrow_weekday,
+        "subs_source": subs_source,
+        "total_subs": len(subs),
+        "preferred_time_filter": preferred_time or "all",
+        "would_send_count": sum(1 for p in preview if p["would_send"]),
+        "subscribers": preview,
+    })
 
 @app.route("/subs_debug")
 def subs_debug():
@@ -1144,8 +1232,8 @@ def subs_debug():
             "SHEET_COL_CONSENT": os.getenv("SHEET_COL_CONSENT"),
             "SHEET_CONSENT_OK": os.getenv("SHEET_CONSENT_OK", "agree,yes,true,1"),
         }
-        subs = current_subscribers()
-        info["source"] = "sheet" if os.getenv("SHEET_CSV_URL") else "memory"
+        subs, sub_source = current_subscribers()
+        info["source"] = sub_source
         info["count"] = len(subs)
         info["sample"] = subs
     except Exception as e:
@@ -1203,7 +1291,7 @@ def run_reminders_for_date():
 
     results: list[dict] = []
     try:
-        subs = current_subscribers()  # or USERS if you prefer
+        subs, _src = current_subscribers()
 
         # Filter by preferred time if specified
         if preferred_time:
