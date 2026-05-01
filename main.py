@@ -83,6 +83,7 @@ ZONE_URLS: Dict[str, str] = {
 # Storage
 USERS_FILE = "users.json"
 SNOOZES_FILE = "snoozes.json"
+UNSUBSCRIBED_FILE = "unsubscribed.json"
 
 # Public opt-in form (optional, shown in /whatsapp_webhook help text)
 FORM_URL = os.environ.get("PUBLIC_SIGNUP_URL", "https://forms.gle/your-google-form-id")
@@ -392,6 +393,23 @@ def save_snoozes(snoozes: list[dict]) -> None:
         json.dump(snoozes, f, indent=2)
 
 
+def load_unsubscribed() -> set[str]:
+    """Load unsubscribed phone numbers (whatsapp:+1...) from disk."""
+    if os.path.exists(UNSUBSCRIBED_FILE):
+        with open(UNSUBSCRIBED_FILE, "r") as f:
+            try:
+                return {p.lower() for p in json.load(f)}
+            except Exception:
+                return set()
+    return set()
+
+
+def save_unsubscribed(phones: set[str]) -> None:
+    """Persist unsubscribed phone numbers to disk."""
+    with open(UNSUBSCRIBED_FILE, "w") as f:
+        json.dump(sorted(phones), f, indent=2)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV loader and 'where to get subscribers' helper
 # ──────────────────────────────────────────────────────────────────────────────
@@ -452,16 +470,23 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
 def current_subscribers() -> tuple[list[dict], str]:
     """Return (subscribers, source) from the Sheet if configured; else fall back to in-memory USERS.
     source is 'sheet' or 'memory' for diagnostic logging.
+    Filters out phones that have replied STOP (tracked in unsubscribed.json).
     """
+    blocked = load_unsubscribed()
+
+    def _not_blocked(u: dict) -> bool:
+        p = (u.get("phone") or u.get("phone_number") or "").lower()
+        return p not in blocked
+
     if SHEET_CSV_URL:
         try:
             subs = load_users_from_sheet(SHEET_CSV_URL)
             if subs:
-                return subs, "sheet"
+                return [u for u in subs if _not_blocked(u)], "sheet"
         except Exception as e:
             print(f"⚠️ Failed to load SHEET_CSV_URL: {e}")
     # fallback: in-memory (from / webhook)
-    return USERS or [], "memory"
+    return [u for u in (USERS or []) if _not_blocked(u)], "memory"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # holiday helpers 
@@ -633,7 +658,8 @@ def parse_message_intent(message: str) -> str:
 
     # Snooze / remind-later keywords (checked first so "remind me later" doesn't match pickup)
     if any(phrase in msg for phrase in ["remind me later", "remind me in the morning",
-                                        "remind later", "snooze", "remind me tomorrow"]):
+                                        "remind later", "snooze", "remind me tomorrow",
+                                        "remind me", "remind"]):
         return "snooze"
 
     # Help keywords
@@ -652,45 +678,42 @@ def parse_message_intent(message: str) -> str:
 
 def get_next_pickup_info(zone: str, collection_day: str, today: date) -> str:
     """
-    Get next pickup day info with holiday awareness.
+    Get next pickup day info (with date) and holiday awareness.
 
-    Returns formatted message like:
-    - "Pickup: Thursday"
-    - "Pickup: Wednesday (Christmas Day holiday shift)"
+    Returns formatted messages like:
+    - "Pickup: today (Thursday, May 1)"
+    - "Pickup: tomorrow (Thursday, May 1)"
+    - "Pickup: Thursday, May 7"
+    - "Pickup: Wednesday, Dec 24 - Christmas Day shift"
     """
-    # Find next occurrence of collection day
-    days_ahead = 0
-    current_date = today
-
-    # Look up to 7 days ahead to find next pickup
     for i in range(7):
         check_date = today + timedelta(days=i)
         check_weekday = check_date.strftime("%A")
 
-        # Get actual collection day for this week (accounting for holidays)
         actual_day, holiday_note = get_actual_collection_day_for_week(
             collection_day, zone, check_date
         )
 
-        if check_weekday == actual_day:
-            # Found the next pickup day
-            if i == 0:
-                day_text = "today"
-            elif i == 1:
-                day_text = "tomorrow"
-            else:
-                day_text = actual_day
+        if check_weekday != actual_day:
+            continue
 
-            if holiday_note:
-                # Extract just the holiday name from the note
-                holiday_match = re.match(r"(.*?) on \w+\.", holiday_note)
-                if holiday_match:
-                    holiday_name = holiday_match.group(1)
-                    return f"Pickup: {day_text} ({holiday_name} shift)"
+        date_str = f"{check_date.strftime('%A, %B')} {check_date.day}"
 
-            return f"Pickup: {day_text}"
+        if i == 0:
+            base = f"Pickup: today ({date_str})"
+        elif i == 1:
+            base = f"Pickup: tomorrow ({date_str})"
+        else:
+            base = f"Pickup: {date_str}"
 
-    # Fallback to normal day
+        if holiday_note:
+            m = re.match(r"(.*?) on \w+\.", holiday_note)
+            if m:
+                return f"{base} - {m.group(1)} shift"
+
+        return base
+
+    # Fallback if no pickup found in the 7-day window
     return f"Pickup: {collection_day}"
 
 def get_recycling_info(today: date) -> str:
@@ -773,7 +796,17 @@ def webhook():
         except Exception as e:
             print(f"⚠️ Zone lookup failed for {address}: {e}")
 
-    # 4) upsert by phone (avoid duplicates)
+    # 4) clear any prior unsubscribe (re-signup re-enables reminders)
+    try:
+        blocked = load_unsubscribed()
+        if phone.lower() in blocked:
+            blocked.discard(phone.lower())
+            save_unsubscribed(blocked)
+            print(f"Removed {phone} from unsubscribed blocklist (re-signup)")
+    except Exception as e:
+        print(f"unsubscribe-clear error: {e}")
+
+    # 5) upsert by phone (avoid duplicates)
     existing = next((u for u in USERS
                      if (u.get("phone") == phone or u.get("phone_number") == phone)), None)
     is_new = existing is None
@@ -841,7 +874,16 @@ def whatsapp_webhook():
     # Handle unsubscribe commands
     lower = body.lower()
     if lower in {"stop", "stop all", "cancel", "unsubscribe", "quit", "end"}:
-        # Try to remove from in-memory list (if still used)
+        # Persist to blocklist so the user is filtered from sheet-loaded subscribers
+        try:
+            blocked = load_unsubscribed()
+            blocked.add(normalized_phone.lower())
+            save_unsubscribed(blocked)
+            print(f"Added {normalized_phone} to unsubscribed blocklist")
+        except Exception as e:
+            print(f"save_unsubscribed error: {e}")
+
+        # Also remove from in-memory list (if still used)
         removed = False
         for i in range(len(USERS) - 1, -1, -1):
             p = USERS[i].get("phone") or USERS[i].get("phone_number")
