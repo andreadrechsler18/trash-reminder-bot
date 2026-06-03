@@ -322,9 +322,12 @@ function onFormSubmit(e) {
   try {
     const responseData = JSON.parse(res.getContentText());
 
-    if (responseData.status === "ok") {
-      const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-      const lastRow = sheet.getLastRow();
+    // Use the exact sheet + row from the form-submit event. getActiveSheet()/
+    // getLastRow() would write to whatever tab was last clicked in the browser
+    // and to that tab's last row — not the responses sheet's new row.
+    if (responseData.status === "ok" && e.range) {
+      const sheet = e.range.getSheet();
+      const lastRow = e.range.getRow();
 
       // Find or create zone and collection_day columns
       const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
