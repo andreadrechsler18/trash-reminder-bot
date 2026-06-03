@@ -151,6 +151,33 @@ def monday_of(d: date) -> date:
 
 # Load address lookup data from CSV (generated from township Excel file)
 _ADDRESS_LOOKUP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
+_NORMALIZED_LOOKUP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
+
+# Map both full street-type words and their abbreviations to a single canonical
+# abbreviation. Keeps "136 Fairview Road" and "136 Fairview Rd" matching the
+# same CSV entry while still distinguishing them from "136 Fairview Ave".
+_STREET_SUFFIX_NORM = {
+    "ROAD": "RD",       "RD": "RD",
+    "AVENUE": "AVE",    "AVE": "AVE",    "AV": "AVE",
+    "LANE": "LN",       "LN": "LN",
+    "DRIVE": "DR",      "DR": "DR",
+    "CIRCLE": "CIR",    "CIR": "CIR",
+    "TERRACE": "TER",   "TER": "TER",    "TERR": "TER",
+    "STREET": "ST",     "ST": "ST",
+    "PARKWAY": "PKWY",  "PKWY": "PKWY",
+    "PLACE": "PL",      "PL": "PL",
+    "COURT": "CT",      "CT": "CT",
+    "BOULEVARD": "BLVD","BLVD": "BLVD",
+}
+
+def _normalize_lookup_key(addr: str) -> str:
+    """Uppercase, collapse spaces, and canonicalize the trailing street suffix."""
+    if not addr:
+        return ""
+    parts = addr.strip().upper().split()
+    if parts and parts[-1] in _STREET_SUFFIX_NORM:
+        parts[-1] = _STREET_SUFFIX_NORM[parts[-1]]
+    return " ".join(parts)
 
 def _load_address_lookup() -> Dict[str, Dict[str, str]]:
     """Load address lookup data from CSV file into memory."""
@@ -183,40 +210,66 @@ def _load_address_lookup() -> Dict[str, Dict[str, str]]:
     _ADDRESS_LOOKUP_CACHE = lookup
     return _ADDRESS_LOOKUP_CACHE
 
+def _load_normalized_address_lookup() -> Dict[str, Dict[str, str]]:
+    """Suffix-normalized view of the CSV lookup, for direct keyed access."""
+    global _NORMALIZED_LOOKUP_CACHE
+    if _NORMALIZED_LOOKUP_CACHE is not None:
+        return _NORMALIZED_LOOKUP_CACHE
+    base = _load_address_lookup()
+    _NORMALIZED_LOOKUP_CACHE = {_normalize_lookup_key(k): v for k, v in base.items()}
+    return _NORMALIZED_LOOKUP_CACHE
+
 def lookup_zone_by_address(address: str) -> Optional[Dict[str, str]]:
     """
     Return {'zone': 'Zone 1', 'collection_day': 'Monday'} for a given address.
     Uses local address_lookup.csv file generated from township data.
-    Returns None if lookup fails.
+
+    Returns None if the address is unknown OR if multiple CSV rows match
+    (e.g. "136 Fairview" with no suffix matches both "136 FAIRVIEW AVE"
+    (Zone 1) and "136 FAIRVIEW RD" (Zone 3)). Ambiguous lookups must be
+    resolved by the subscriber providing a fuller address — silently
+    picking one would risk wrong-zone reminders.
     """
     if not address:
         return None
 
-    # Load lookup data
-    lookup = _load_address_lookup()
-    if not lookup:
+    base_lookup = _load_address_lookup()
+    if not base_lookup:
         return None
+    normalized_lookup = _load_normalized_address_lookup()
 
-    # Normalize address for lookup
-    addr_normalized = street_number_and_name(address).strip().upper()
+    addr_normalized = _normalize_lookup_key(street_number_and_name(address))
 
-    # Try exact match first
-    if addr_normalized in lookup:
-        return lookup[addr_normalized]
+    # Exact match against suffix-normalized keys
+    if addr_normalized in normalized_lookup:
+        return normalized_lookup[addr_normalized]
 
-    # Try fuzzy match - look for addresses that contain the street number + name
+    # Fuzzy fallback (for inputs that omit the suffix, e.g. "229 Ardleigh"):
+    # require an EXACT match on the street-name word so "229 Ardleigh" doesn't
+    # also pull in "229 Ardmore Ave". Collect every candidate that matches and
+    # only return if they unanimously agree on (zone, day) — otherwise we'd
+    # risk silently assigning the wrong zone.
     addr_parts = addr_normalized.split()
-    if len(addr_parts) >= 2:
-        street_num = addr_parts[0]
-        for lookup_addr, data in lookup.items():
-            if lookup_addr.startswith(street_num + " "):
-                # Check if street name matches (at least first word)
-                lookup_parts = lookup_addr.split()
-                if len(lookup_parts) >= 2 and len(addr_parts) >= 2:
-                    if lookup_parts[1].startswith(addr_parts[1][:3]):  # First 3 chars of street name
-                        return data
+    if len(addr_parts) < 2:
+        return None
+    street_num = addr_parts[0]
+    street_name_word = addr_parts[1]
 
-    return None
+    candidates: list[Dict[str, str]] = []
+    for lookup_addr, data in base_lookup.items():
+        if not lookup_addr.startswith(street_num + " "):
+            continue
+        lookup_parts = lookup_addr.split()
+        if len(lookup_parts) >= 2 and lookup_parts[1] == street_name_word:
+            candidates.append(data)
+
+    if not candidates:
+        return None
+    first = candidates[0]
+    if all(c["zone"] == first["zone"] and c["collection_day"] == first["collection_day"]
+           for c in candidates):
+        return first
+    return None  # Ambiguous — refuse to guess
 
 def _parse_date(txt: str, year: int) -> date | None:
     """Accept 'Monday, December 25, 2025' or 'December 25, 2025'."""
