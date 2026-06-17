@@ -683,18 +683,27 @@ def get_actual_collection_day_for_week(normal_collection_day: str, zone: str, re
         # Holiday falls on weekend or no shift rule - no change
         return (normal_collection_day, None)
 
-    # If user's normal collection day is the same as the holiday weekday,
-    # their collection shifts to the shifted_day
-    if normal_collection_day == holiday_weekday:
+    # The chart's shifted_day is the actual collection day for this zone in
+    # weeks containing a holiday on `holiday_weekday`. If it differs from the
+    # user's normal day, their collection IS shifted — even when the holiday
+    # isn't on their normal pickup day. Example: Zone 3 normal Thursday with
+    # Juneteenth on Friday → chart says collection happens Wednesday → shift.
+    if shifted_day != normal_collection_day:
+        # If we couldn't get a shift-aware note above (scrape failed and
+        # HOLIDAY_RULES_JSON isn't populated), build one from the chart so
+        # the message accurately reflects the actual shift.
+        if not holiday_note or "unchanged" in holiday_note:
+            holiday_note = (
+                f"{holiday_name} on {holiday_weekday}. "
+                f"Pickup shifted to {shifted_day} this week."
+            )
         return (shifted_day, holiday_note)
     else:
-        # Holiday doesn't affect this user's collection
-        # Return normal day with a note that their schedule is unchanged
-        if holiday_note:
-            # Update note to say schedule unchanged
-            unchanged_note = f"{holiday_name} this week. Your regular pickup schedule is unchanged."
-            return (normal_collection_day, unchanged_note)
-        return (normal_collection_day, None)
+        # Chart's day equals user's normal day — no actual shift for this zone.
+        return (
+            normal_collection_day,
+            f"{holiday_name} this week. Your regular pickup schedule is unchanged.",
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
