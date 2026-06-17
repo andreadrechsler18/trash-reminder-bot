@@ -65,6 +65,31 @@ def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
     raise ValueError(f"Could not find {n}th {weekday} in {year}-{month}")
 
 
+# Calendar (m, d) for the fixed-date federal holidays observed by the
+# township. Floating holidays (MLK, Memorial, Labor, Thanksgiving) always
+# fall on a weekday and never need an observance shift.
+_FIXED_HOLIDAY_CAL_DATES = {
+    "New Year's Day": (1, 1),
+    "Juneteenth": (6, 19),
+    "Independence Day": (7, 4),
+    "Christmas Day": (12, 25),
+}
+
+
+def format_holiday_label(name: str, holiday_date: date) -> str:
+    """
+    Build the leading clause of a holiday-shift note, distinguishing the
+    actual holiday from a federal observance day:
+      "Independence Day on Friday"          (calendar date is a Friday — no shift)
+      "Independence Day (observed Friday)"  (Sat/Sun calendar date → Fri/Mon observance)
+    """
+    weekday = holiday_date.strftime("%A")
+    cal = _FIXED_HOLIDAY_CAL_DATES.get(name)
+    if cal and (holiday_date.month, holiday_date.day) != cal:
+        return f"{name} (observed {weekday})"
+    return f"{name} on {weekday}"
+
+
 def observed_date(holiday_date: date) -> date:
     """
     Apply federal observance: a fixed-date holiday falling on Saturday is

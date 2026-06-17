@@ -347,12 +347,11 @@ def get_next_holiday_shift(zone: str | None, ref_date: date | None = None) -> st
             holiday_date = r['date']
             shifted_day = r["weekday"]
 
+            from holiday_rules import format_holiday_label
+            label = format_holiday_label(holiday_name, holiday_date)
             if shifted_day:
-                # Holiday causes a shift - show new day
-                weekday_name = holiday_date.strftime("%A")
-                return f"{holiday_name} on {weekday_name}. Pickup shifted to {shifted_day} this week."
+                return f"{label}. Pickup shifted to {shifted_day} this week."
             else:
-                # Holiday doesn't affect pickup (falls on weekend)
                 return f"{holiday_name} this week. Your regular pickup schedule is unchanged."
 
     # No holiday this week
@@ -636,8 +635,8 @@ def holiday_note_from_rules(zone: str | None, d: date) -> Optional[str]:
     name, holiday_date = holiday_info
     wd = (HOLIDAY_RULES.get(zone, {}) or {}).get(name)  # e.g., "Friday"
     if wd:
-        weekday_name = holiday_date.strftime("%A")
-        return f"{name} on {weekday_name}. Pickup shifted to {wd} this week."
+        from holiday_rules import format_holiday_label
+        return f"{format_holiday_label(name, holiday_date)}. Pickup shifted to {wd} this week."
     else:
         return f"{name} this week. Your regular pickup schedule is unchanged."
 
@@ -699,8 +698,9 @@ def get_actual_collection_day_for_week(normal_collection_day: str, zone: str, re
         # HOLIDAY_RULES_JSON isn't populated), build one from the chart so
         # the message accurately reflects the actual shift.
         if not holiday_note or "unchanged" in holiday_note:
+            from holiday_rules import format_holiday_label
             holiday_note = (
-                f"{holiday_name} on {holiday_weekday}. "
+                f"{format_holiday_label(holiday_name, holiday_date)}. "
                 f"Pickup shifted to {shifted_day} this week."
             )
         return (shifted_day, holiday_note)
