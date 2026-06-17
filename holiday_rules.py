@@ -65,6 +65,22 @@ def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
     raise ValueError(f"Could not find {n}th {weekday} in {year}-{month}")
 
 
+def observed_date(holiday_date: date) -> date:
+    """
+    Apply federal observance: a fixed-date holiday falling on Saturday is
+    observed Friday, falling on Sunday is observed Monday. Lower Merion's
+    refuse division follows federal observance — e.g. Independence Day
+    2026 (Saturday July 4) is observed Friday July 3, and the chart's
+    weekday shift rules apply to that Friday.
+    """
+    wd = holiday_date.weekday()  # 0=Mon … 6=Sun
+    if wd == 5:  # Saturday
+        return holiday_date - timedelta(days=1)
+    if wd == 6:  # Sunday
+        return holiday_date + timedelta(days=1)
+    return holiday_date
+
+
 def calculate_federal_holidays(year: int) -> list:
     """
     Calculate the dates of federal holidays observed by Lower Merion Township.
@@ -80,14 +96,14 @@ def calculate_federal_holidays(year: int) -> list:
     - Christmas Day (December 25)
     """
     holidays = [
-        {"name": "New Year's Day", "date": date(year, 1, 1)},
+        {"name": "New Year's Day", "date": observed_date(date(year, 1, 1))},
         {"name": "Martin Luther King Jr. Day", "date": nth_weekday_of_month(year, 1, MONDAY, 3)},
         {"name": "Memorial Day", "date": nth_weekday_of_month(year, 5, MONDAY, -1)},
-        {"name": "Juneteenth", "date": date(year, 6, 19)},
-        {"name": "Independence Day", "date": date(year, 7, 4)},
+        {"name": "Juneteenth", "date": observed_date(date(year, 6, 19))},
+        {"name": "Independence Day", "date": observed_date(date(year, 7, 4))},
         {"name": "Labor Day", "date": nth_weekday_of_month(year, 9, MONDAY, 1)},
         {"name": "Thanksgiving Day", "date": nth_weekday_of_month(year, 11, THURSDAY, 4)},
-        {"name": "Christmas Day", "date": date(year, 12, 25)},
+        {"name": "Christmas Day", "date": observed_date(date(year, 12, 25))},
     ]
 
     return holidays

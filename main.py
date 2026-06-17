@@ -580,12 +580,18 @@ def us_holiday_in_week(d: date) -> Optional[str]:
     return None
 
 def get_holiday_date_in_week(d: date) -> Optional[tuple[str, date]]:
-    """Return (holiday_name, holiday_date) for the week containing d, or None."""
+    """Return (holiday_name, observed_holiday_date) for the week containing d, or None.
+
+    Fixed-date holidays falling on Saturday/Sunday are returned at their OBSERVED
+    weekday (Sat → Fri, Sun → Mon) so the chart's weekday shift rules apply
+    correctly. Lower Merion's refuse division follows federal observance.
+    """
     wk_mon = d - timedelta(days=d.weekday())
     wk_sun = wk_mon + timedelta(days=6)
     y = wk_mon.year
+    from holiday_rules import observed_date as _obs
     def in_week(m, dd):
-        t = date(y, m, dd)
+        t = _obs(date(y, m, dd))
         return (wk_mon <= t <= wk_sun, t)
     # fixed
     is_in, dt = in_week(1,1)
