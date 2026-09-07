@@ -775,7 +775,9 @@ def get_next_pickup_info(zone: str, collection_day: str, today: date) -> str:
             base = f"Pickup: {date_str}"
 
         if holiday_note:
-            m = re.match(r"(.*?) on \w+\.", holiday_note)
+            # Matches both "Christmas Day on Thursday." and the federal-observance
+            # form "Christmas Day (observed Friday)." so the shift suffix survives.
+            m = re.match(r"(.*?)(?: on \w+| \(observed \w+\))\.", holiday_note)
             if m:
                 return f"{base} - {m.group(1)} shift"
 

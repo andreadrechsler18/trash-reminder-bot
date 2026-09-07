@@ -3,12 +3,34 @@ Holiday collection shift rules for Lower Merion Township
 Based on the chart from: https://www.lowermerion.org/departments/public-works-department/refuse-and-recycling/holiday-collection
 
 Automatically calculates federal holiday dates for any year.
+
+VERIFICATION LOG
+----------------
+HOLIDAY_SHIFT_RULES below is HAND-TRANSCRIBED. The township page is behind
+Akamai and returns 403 to the bot (and to WebFetch), so the scraper cannot
+re-check it automatically — the only thing keeping this table honest is a
+person opening the page in a browser now and then.
+
+  2026-09-06  Andrea  verified against the live township page — no change.
+
+If the page ever changes, update the table AND add a line here.
 """
 
 from datetime import date, timedelta
 from calendar import monthcalendar, MONDAY, THURSDAY
 
-# Holiday shift rules based on the township chart
+# Holiday shift rules based on the township chart.
+#
+# Read as: HOLIDAY_SHIFT_RULES[zone][weekday the holiday falls on] = the day
+# that ENTIRE zone is collected that week. The value is an absolute day, not
+# an offset, so it must be compared against the resident's normal collection
+# day to decide whether they are actually shifted.
+#
+# A zone spans more than one normal day (per address_lookup.csv, Zone 3 has
+# ~2700 Thursday addresses and ~1300 Wednesday ones), which is why the same
+# holiday shifts some residents in a zone and leaves others unchanged. Labor
+# Day 2026 is the worked example: Zone 3 -> Thursday, so Thursday addresses
+# are unchanged while Wednesday addresses move to Thursday.
 HOLIDAY_SHIFT_RULES = {
     "Zone 1": {
         "Monday": "Tuesday",
