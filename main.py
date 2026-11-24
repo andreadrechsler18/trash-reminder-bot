@@ -539,7 +539,7 @@ def save_subs_cache(subs: list[dict]) -> None:
     os.replace(tmp, SUBS_CACHE_FILE)
 
 
-def current_subscribers(timeout: float = 8, attempts: int = 3) -> tuple[list[dict], str]:
+def current_subscribers(timeout: float = 6, attempts: int = 2) -> tuple[list[dict], str]:
     """Return (subscribers, source) from the Sheet if configured.
     Retries the sheet download; if Google is slow or down, falls back to the last good
     copy ('cache'), then to in-memory USERS ('memory').
@@ -1137,14 +1137,18 @@ def run_reminders_now():
     tz = pytz.timezone("US/Eastern")
     now_et = datetime.now(tz)
     tomorrow = now_et.date() + timedelta(days=1)
+    # Any failed send (Twilio rejection, missing template) -> 500 so cron-job.org flags the run
+    failed = [r for r in results
+              if r.get("status") == "error" or r.get("error") == "missing_template_sid"]
     return jsonify({
         "count": len(results),
+        "failed": len(failed),
         "results": results,
         "preferred_time": preferred_time or "all",
         "now_et": now_et.isoformat(),
         "tomorrow": tomorrow.isoformat(),
         "tomorrow_weekday": tomorrow.strftime("%A"),
-    })
+    }), (500 if failed else 200)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reminder engine (called by cron; not scheduled in-process here)
