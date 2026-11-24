@@ -84,6 +84,7 @@ ZONE_URLS: Dict[str, str] = {
 USERS_FILE = "users.json"
 SNOOZES_FILE = "snoozes.json"
 UNSUBSCRIBED_FILE = "unsubscribed.json"
+SUBS_CACHE_FILE = "subscribers_cache.json"  # last good sheet load, used if Google is slow/down
 
 # Public opt-in form (optional, shown in /whatsapp_webhook help text)
 FORM_URL = os.environ.get("PUBLIC_SIGNUP_URL", "https://forms.gle/your-google-form-id")
@@ -465,10 +466,10 @@ def save_unsubscribed(phones: set[str]) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV loader and 'where to get subscribers' helper
 # ──────────────────────────────────────────────────────────────────────────────
-def load_users_from_sheet(csv_url: str) -> list[dict]:
+def load_users_from_sheet(csv_url: str, timeout: float = 15) -> list[dict]:
     if not csv_url:
         return []
-    resp = requests.get(csv_url, timeout=15)
+    resp = requests.get(csv_url, timeout=timeout)
     resp.raise_for_status()
     rdr = csv.DictReader(io.StringIO(resp.text))
     users = []
@@ -519,9 +520,29 @@ def load_users_from_sheet(csv_url: str) -> list[dict]:
         users.append(user_dict)
     return users
 
-def current_subscribers() -> tuple[list[dict], str]:
-    """Return (subscribers, source) from the Sheet if configured; else fall back to in-memory USERS.
-    source is 'sheet' or 'memory' for diagnostic logging.
+def load_subs_cache() -> list[dict]:
+    """Load the last subscriber list successfully read from the sheet."""
+    if os.path.exists(SUBS_CACHE_FILE):
+        with open(SUBS_CACHE_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except Exception:
+                return []
+    return []
+
+
+def save_subs_cache(subs: list[dict]) -> None:
+    """Persist the subscriber list (write-then-rename so the other worker never reads half a file)."""
+    tmp = SUBS_CACHE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(subs, f, indent=2)
+    os.replace(tmp, SUBS_CACHE_FILE)
+
+
+def current_subscribers(timeout: float = 8, attempts: int = 3) -> tuple[list[dict], str]:
+    """Return (subscribers, source) from the Sheet if configured.
+    Retries the sheet download; if Google is slow or down, falls back to the last good
+    copy ('cache'), then to in-memory USERS ('memory').
     Filters out phones that have replied STOP (tracked in unsubscribed.json).
     """
     blocked = load_unsubscribed()
@@ -531,12 +552,22 @@ def current_subscribers() -> tuple[list[dict], str]:
         return p not in blocked
 
     if SHEET_CSV_URL:
-        try:
-            subs = load_users_from_sheet(SHEET_CSV_URL)
-            if subs:
-                return [u for u in subs if _not_blocked(u)], "sheet"
-        except Exception as e:
-            print(f"⚠️ Failed to load SHEET_CSV_URL: {e}")
+        for attempt in range(1, attempts + 1):
+            try:
+                subs = load_users_from_sheet(SHEET_CSV_URL, timeout=timeout)
+                if subs:
+                    try:
+                        save_subs_cache(subs)
+                    except Exception as e:
+                        print(f"save_subs_cache error: {e}")
+                    return [u for u in subs if _not_blocked(u)], "sheet"
+                print(f"⚠️ SHEET_CSV_URL returned no subscribers (attempt {attempt}/{attempts})")
+            except Exception as e:
+                print(f"⚠️ Failed to load SHEET_CSV_URL (attempt {attempt}/{attempts}): {e}")
+        cached = load_subs_cache()
+        if cached:
+            print(f"⚠️ Using cached subscriber list ({len(cached)} subs)")
+            return [u for u in cached if _not_blocked(u)], "cache"
     # fallback: in-memory (from / webhook)
     return [u for u in (USERS or []) if _not_blocked(u)], "memory"
 
@@ -971,9 +1002,10 @@ def whatsapp_webhook():
     # Parse message intent
     intent = parse_message_intent(body)
 
-    # Look up user from current subscribers
+    # Look up user from current subscribers. One short attempt, then the cached
+    # copy: Twilio drops the reply if we take longer than 15 seconds.
     try:
-        subs, _src = current_subscribers()
+        subs, _src = current_subscribers(timeout=4, attempts=1)
         user = next((u for u in subs if (u.get("phone") or u.get("phone_number", "")).lower() == normalized_phone.lower()), None)
     except Exception as e:
         print(f"Error loading subscribers: {e}")
@@ -1129,14 +1161,14 @@ def send_weekly_reminders(preferred_time: str | None = None) -> list[dict]:
     """
     results: list[dict] = []
 
-    # Load subs (sheet or memory)
-    try:
-        subs, subs_source = current_subscribers()
-    except Exception as e:
-        print("current_subscribers() error:", e)
-        return results
+    # Load subs (sheet, cached sheet, or memory). Let failures raise so the cron
+    # endpoint returns 500 instead of a misleading "count: 0" success.
+    subs, subs_source = current_subscribers()
 
     print(f"[DIAG] send_weekly_reminders: source={subs_source}, total_subs={len(subs)}, preferred_time_filter={preferred_time}")
+
+    if SHEET_CSV_URL and subs_source == "memory":
+        raise RuntimeError("Could not load the subscriber sheet and no cached copy exists")
 
     if not subs:
         print("No subscribers found.")
